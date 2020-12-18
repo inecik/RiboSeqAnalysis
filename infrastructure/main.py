@@ -3,6 +3,7 @@
 """
 
 
+import sys
 import os
 import re
 import subprocess
@@ -21,52 +22,103 @@ from Bio.Seq import translate
 from Bio import pairwise2
 
 
-infrastructure_script_path = __file__
+script_path_infrastructure = __file__
 
 
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, exclude_genes=None, ensembl_release=102,
-                 sam_translatome=None, sam_sixtymers=None,
-                 include_gene3d=False, include_protein_genome=False):
+                 sam_translatome=None, sam_sixtymers=None, riboseq_assign_to="best_transcript", riboseq_assign_at = -1,
+                 include_gene3d=False):
 
         self.temp_repo_dir = temp_repo_dir
         self.exclude_genes = exclude_genes
         self.ensembl_release = ensembl_release
 
-        self.gene_info_db_script = os.path.abspath(os.path.join(os.path.dirname(infrastructure_script_path), "gene_info_database.R"))
-        gene_info_database = biomart_mapping(self.temp_repo_dir, self.gene_info_db_script, self.ensembl_release)
-        gene_info_database = gene_info_database[gene_info_database["transcript_biotype"] == "protein_coding"].drop(columns=["transcript_biotype"])
+        self.script_path_infrastructure = script_path_infrastructure
+        self.script_path_gene_info_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_database.R"))
+        gene_info_database = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_db, self.ensembl_release)
 
-        gene_list = np.unique(gene_info_database["ensembl_gene_id"].dropna())
-        gene_list = np.setdiff1d(gene_list, exclude_genes)
+        self.script_path_gene_info_names_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_names.R"))
+        gene_info_names = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_names_db, self.ensembl_release)
+
+        self.gene_list = np.unique(gene_info_database["ensembl_gene_id"].dropna())
+        self.gene_list = np.sort(np.setdiff1d(self.gene_list, self.exclude_genes))
+
+        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names)
 
         ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release)
 
-        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, gene_list, gene_info_database, ero)
-
-        if include_protein_genome:
-            transcript_list = np.unique(gene_info_database["ensembl_transcript_id"].dropna())
-            self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero)
+        transcript_list = np.unique(gene_info_database["ensembl_transcript_id"].dropna())
+        self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero)
 
         if include_gene3d:
-            self.gene3d_db_script = os.path.abspath(os.path.join(os.path.dirname(infrastructure_script_path), "gene3d.R"))
-            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.gene3d_db_script, self.protein_genome, ero)
+            self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
+            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero)
+
+        if sam_translatome or sam_sixtymers:
+            self.riboseq_assign_to = riboseq_assign_to
+            self.riboseq_assign_at = riboseq_assign_at
 
         if sam_translatome:
-            self.translatome = RiboSeqAssignment(sam_translatome, self.temp_repo_dir, gene_list, -1, "translatome", ero)
+            self.translatome = RiboSeqAssignment(sam_translatome, self.temp_repo_dir, self.gene_list, assignment=self.riboseq_assign_at,
+                                                 selection=self.riboseq_assign_to, riboseq_group="translatome",
+                                                 protein_genome_instance=self.protein_genome, gene_info_dictionary=self.gene_info)
 
         if sam_sixtymers:
-            self.sixtymers = RiboSeqAssignment(sam_sixtymers, self.temp_repo_dir, gene_list, -1, "sixtymers", ero)
+            self.sixtymers = RiboSeqAssignment(sam_sixtymers, self.temp_repo_dir, self.gene_list, assignment=self.riboseq_assign_at,
+                                                 selection=self.riboseq_assign_to, riboseq_group="sixtymers",
+                                                 protein_genome_instance=self.protein_genome, gene_info_dictionary=self.gene_info)
+
+        if sam_translatome and sam_sixtymers:
+            assert np.all(self.sixtymers.gene_list == self.translatome.gene_list)
+            del self.sixtymers.gene_list, self.translatome.gene_list
 
         # Uniprot
         # Conservation
 
+
     def calculate_stalling_peaks_arpat(self):
         try:
-            pass
+            output = dict()
+            translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
+            for ind, gene_id in enumerate(self.gene_list):
+                position_rpm_mean = np.mean(self.sixtymers.calculate_rpm_positions(gene_id), axis=0)
+                normalized_peak_count = np.sum(position_rpm_mean != 0)
+                gene_rpm_mean = translatome_rpm_mean[ind]
+                if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
+                    output[gene_id] = np.nan
+                else:
+                    normalized_rpm = position_rpm_mean / gene_rpm_mean
+                    output[gene_id] = normalized_rpm.argsort()[-5:][::-1] # Arbitrarily 5
+                    # todo: genome position'larını return etsin
+            return output
         except NameError:
             print(f"{Col.WARNING}Translatome and/or sixtymers are not defined.{Col.ENDC}")
+
+    def calculate_stalling_peaks_inecik(self):
+        try:
+            output = dict()
+            translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
+            for ind, gene_id in enumerate(self.gene_list):
+                position_rpm_mean = np.mean(self.sixtymers.calculate_rpm_positions(gene_id), axis=0)
+                normalized_peak_count = np.sum(position_rpm_mean != 0)
+                gene_rpm_mean = translatome_rpm_mean[ind]
+                if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
+                    output[gene_id] = np.nan
+                else:
+                    normalized_rpm = position_rpm_mean / gene_rpm_mean
+
+        except NameError:
+            print(f"{Col.WARNING}Translatome and/or sixtymers are not defined.{Col.ENDC}")
+
+    def create_gene_matrix(self, gene_id):
+        pass
+        # todo: integrates all information about the gene (n, l); n-feature, length
+        # aa, nt,
+        # traslatome_rpm, sixtymer_rpm..,
+        # stalling sites, co-co sites, selective-ribosome,
+        # uniprot, gene3d, conservation
 
     # annotation:
     # uniprot_annotations_ranges
@@ -77,7 +129,8 @@ class Infrastructre:
     # get_riboseq, get_domain, get_conservation gibi function'lar yapılacakGE
 
 
-def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, ensembl_release_object, overwrite=False, verbose=True):
+def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_info_names, overwrite=False, verbose=True):
+    
     output_path = os.path.join(temp_repo_dir, "gene_info_database.joblib")
     if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or overwrite:
         output = dict()
@@ -86,7 +139,8 @@ def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, ensem
         for ind, gene_id in enumerate(gene_list):
             progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}")
             gi = gene_info_database[gene_info_database["ensembl_gene_id"] == gene_id]
-            output[gene_id] = Gene(gi, ensembl_release_object)
+            gi_names = gene_info_names[gene_info_names["ensembl_gene_id"] == gene_id]
+            output[gene_id] = Gene(gi, gi_names)
         print(f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
         joblib.dump(output, output_path)
         if verbose:
@@ -100,11 +154,11 @@ def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, ensem
 
 class Gene:
 
-    def __init__(self, one_gene_df, ensembl_release_object):
+    def __init__(self, one_gene_df, one_gene_names):
 
         temp_gene_id = one_gene_df["ensembl_gene_id"].unique()
         self.gene_id = temp_gene_id[0]
-        self.gene_names = np.unique(np.concatenate((one_gene_df["external_gene_name"].dropna(), one_gene_df["external_synonym"].dropna())))
+        self.gene_names = np.unique(np.concatenate((one_gene_names["external_gene_name"].dropna(), one_gene_names["external_synonym"].dropna())))
         temp_chromosome = np.unique(np.array(one_gene_df["chromosome_name"], dtype=str))
         self.chromosome = str(temp_chromosome[0])
         temp_strand = one_gene_df["strand"].unique()
@@ -114,21 +168,11 @@ class Gene:
         temp_end = one_gene_df["end_position"].unique()
         self.end = int(temp_end[0])
         assert all([len(i) == 1 for i in [temp_chromosome, temp_strand, temp_start, temp_end]])
-
-        # Gene3d
-        # pre_ensembl_peptide_ids = np.unique(one_gene_df["ensembl_peptide_id"])
-        # pre_gene3d = gene3d_df[gene3d_df[""].isin(pre_ensembl_peptide_ids)].sort_values(
-        #    by=["ensembl_peptide_id", "gene3d_start", "gene3d_end", "gene3d"], ignore_index=True)
-        # Data
-        # self.gene3d = pre_gene3d
-
         self.transcripts = self.prioritize_transcripts(one_gene_df)
-        self.cds_ranges = gene_cds_ranges(ensembl_release_object, self.gene_id)
 
     @staticmethod
     def prioritize_transcripts(gene_df):
-        transcripts = gene_df.drop(["ensembl_gene_id", "external_gene_name", "external_synonym",
-                                    "chromosome_name", "start_position", "end_position", "strand"], axis=1).drop_duplicates()
+        transcripts = gene_df.drop(["ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand"], axis=1).drop_duplicates()
         transcripts["transcript_appris"] = transcripts["transcript_appris"].replace(
             ["alternative1", "alternative2"], ["renamed_alternative1", "renamed_alternative2"])
         # apris'de üçbeş
@@ -136,8 +180,10 @@ class Gene:
         # mane_clinical var mı yok my
         # basic or not
         # tsl sıralı zaten
+
         transcripts.sort_values(by=["transcript_mane_select", "transcript_appris", "transcript_gencode_basic",
                                     "transcript_tsl", "external_transcript_name"], inplace=True, ignore_index=True)
+        # apris uzun olanı seçiyor zaten
         return transcripts
 
 
@@ -145,7 +191,7 @@ class ProteinGenome:
 
     def __init__(self, temp_repo_dir, transcript_list, ensembl_release_object, verbose=True, recalculate=False):
         self.transcript_list = np.sort(transcript_list)
-        self.ensembl_release_object = ensembl_release_object
+        self.ensembl_release = ensembl_release_object.annotation_version
         self.temp_repo_dir = temp_repo_dir
         self.verbose = verbose
         self.file_name = "protein_genome_instance.joblib"
@@ -160,8 +206,8 @@ class ProteinGenome:
             loaded_content = self.load_joblib(self.output_file_name, self.verbose)
             consistent_with = all([
                 (self.transcript_list == loaded_content.transcript_list).all(),
-                self.ensembl_release_object == loaded_content.ensembl_release_object,
                 self.temp_repo_dir == loaded_content.temp_repo_dir,
+                self.ensembl_release == loaded_content.ensembl_release,
                 self.file_name == loaded_content.file_name,
                 self.output_file_name == loaded_content.output_file_name,
             ])
@@ -169,9 +215,9 @@ class ProteinGenome:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
                 raise AssertionError
             self.transcripts = loaded_content.transcripts
-        except (AssertionError, FileNotFoundError):
+        except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
-            self.calculate_transcript_mapping()
+            self.calculate_transcript_mapping(ensembl_release_object)
             self.save_joblib()
 
     @staticmethod
@@ -233,7 +279,12 @@ class ProteinGenome:
                     return relative_position - query_offset
             raise AssertionError("Error in find_overhang")
 
-        coding_position_ranges = [list(i) for i in transcript_object.coding_sequence_position_ranges]
+        try:
+            coding_position_ranges = [list(i) for i in transcript_object.coding_sequence_position_ranges]
+        except ValueError: # ValueError: Transcript does not contain feature CDS
+            return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in transcript_object.exon_intervals], \
+                   None, transcript_object.sequence, transcript_object.contig, transcript_object.strand
+
         if transcript_object.complete:
             assert len(transcript_object.coding_sequence) == len(transcript_object.protein_sequence) * 3 + 3
             assert ensembl_range_sum(coding_position_ranges) == len(transcript_object.protein_sequence) * 3
@@ -273,14 +324,14 @@ class ProteinGenome:
             return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in coding_position_ranges], \
                    transcript_object.protein_sequence, query_transcript, transcript_object.contig, transcript_object.strand
 
-    def calculate_transcript_mapping(self):
+    def calculate_transcript_mapping(self, ensembl_release_object):
         assert len(np.unique(self.transcript_list)) == len(self.transcript_list)
         output = dict()
         for ind, transcript_id in enumerate(self.transcript_list):
             if self.verbose:
                 progress_bar(ind, len(self.transcript_list) - 1)
-            transcript_object = self.ensembl_release_object.transcript_by_id(transcript_id)
-            output[transcript_id] = ProteinGenome.consistent_coding_ranges(transcript_object)
+            transcript_object = ensembl_release_object.transcript_by_id(transcript_id)
+            output[transcript_id] = self.consistent_coding_ranges(transcript_object)
         self.transcripts = output
 
     def save_joblib(self):
@@ -369,7 +420,7 @@ class EnsemblDomain:
                 raise AssertionError
             self.df = loaded_content.df
             self.columns = loaded_content.columns
-        except (AssertionError, FileNotFoundError):
+        except (AssertionError, AttributeError, FileNotFoundError):
             assert protein_genome_instance, "Undefined protein_genome_instance."
             assert ensembl_release_object, "Undefined ensembl_release_object."
             print(f"{Col.HEADER}Ensembl domains are being calculated: {self.base_name}{Col.ENDC}")
@@ -382,7 +433,6 @@ class EnsemblDomain:
         protein_ids = self.df[self.columns[0]]
         domain_starts = self.df[self.columns[1]]
         domain_ends = self.df[self.columns[2]]
-        print(self.columns)
         coordinates_ranges = list()
         coordinates_contig = list()
         for ind, (protein_id, domain_start, domain_end) in enumerate(zip(protein_ids, domain_starts, domain_ends)):
@@ -415,23 +465,26 @@ class EnsemblDomain:
 # uniprot ve conservation'u tatilde yap
 # gene class'ını bitir.
 # co-co site'ı hesaplayan fitting şeyi yaz: coco_site'ı eklemlendir.
-#
+# TODO: neden link_pair aktif ki zaten
+# paired end yap sadece star ile, sonra -1'ine assign et sadece.
+# riboseqassignment' class assignment'tan sonra 15 nt geriye gitsin
 # TODO: TOMORROW
-# çocuğun analizine başla
-
+# Link pair'siz paired end yazdır!
+# protein_coding'i kaldırarak yazdır !
 
 class RiboSeqAssignment:
 
-    def __init__(self, sam_paths, temp_repo_dir, gene_list, assignment, riboseq_group, ensembl_release_object, verbose=True, recalculate=False):
+    def __init__(self, sam_paths, temp_repo_dir, gene_list, assignment, selection, riboseq_group,
+                 protein_genome_instance, gene_info_dictionary, verbose=True, recalculate=False):
         # :param riboseq_group: String to identify the RiboSeq experiment annotation; like "translatome" or "60mers"
         self.sam_paths = np.sort(sam_paths)
         self.temp_repo_dir = temp_repo_dir
-        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_on_genes_{riboseq_group}.joblib")
-        self.gene_list = np.sort(gene_list)
+        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{selection}.joblib")
+        self.gene_list = gene_list
         self.assignment = assignment
         self.verbose = verbose
+        self.selection = selection
         self.riboseq_group = riboseq_group  # Define riboseq_group variable for a function.
-        self.ensembl_release_object = ensembl_release_object
         self.recalculate = recalculate
 
         try:
@@ -444,10 +497,10 @@ class RiboSeqAssignment:
                 (self.sam_paths == loaded_content.sam_paths).all(),
                 self.temp_repo_dir == loaded_content.temp_repo_dir,
                 self.output_file_name == loaded_content.output_file_name,
+                self.selection == loaded_content.selection,
                 self.riboseq_group == loaded_content.riboseq_group,
                 (self.gene_list == loaded_content.gene_list).all(),
-                self.assignment == loaded_content.assignment,
-                self.ensembl_release_object == loaded_content.ensembl_release_object
+                self.assignment == loaded_content.assignment
             ])
             if not consistent_with:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
@@ -457,12 +510,12 @@ class RiboSeqAssignment:
             self.total_assigned_gene = loaded_content.total_assigned_gene
             self.total_assigned = loaded_content.total_assigned
 
-        except (AssertionError, FileNotFoundError):
+        except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Gene assignments are being calculated: {self.riboseq_group}{Col.ENDC}")
-            self.calculate_gene_assignments()
-            self.gene_lengths = np.array([self.gene_assignments[i].shape[1] if i in self.gene_assignments else np.nan for i in self.gene_list])
-            self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) if i in self.gene_assignments else np.zeros(len(self.sam_paths)) for i in self.gene_list])
-            self.total_assigned = np.sum(self.total_assigned_gene)
+            self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary)
+            self.gene_lengths = np.array([int(self.gene_assignments[i].shape[1]) if i in self.gene_assignments else np.nan for i in self.gene_list])
+            self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) if i in self.gene_assignments else np.zeros(len(self.sam_paths)) for i in self.gene_list], dtype=np.int64)
+            self.total_assigned = int(np.sum(self.total_assigned_gene))
             self.save_joblib()
 
     def get_assigned_read_mapped_read_all(self):
@@ -481,15 +534,21 @@ class RiboSeqAssignment:
         assigned_read = list(np.sum(self.total_assigned_gene, axis=0))
         return {l: [a, m] for a, m, l in zip(assigned_read, mapped_read, list(self.sam_paths))}
 
-    def calculate_gene_assignments(self):
+    def calculate_gene_assignments(self, protein_genome_instance, gene_info_dictionary):
+
         if self.verbose:
             print(f"{Col.HEADER}Genes are allocated to chromosomes.{Col.ENDC}")
         # Get the mapping from chromosomes to list of genes which they carry
-        chromosome_gene = self.chromosomes_genes_matcher(self.ensembl_release_object, self.gene_list)
+        chromosome_gene = self.chromosomes_genes_matcher(gene_info_dictionary, self.gene_list)
         if self.verbose:
             print(f"{Col.HEADER}CDS ranges of genes are being calculated.{Col.ENDC}")
         # Get array of genomic positions for all genes, create a dictionary out of it.
-        positions_gene = {i: gene_cds_array(self.ensembl_release_object, i) for i in self.gene_list}
+        if self.selection == "gene":
+            positions_gene = {gene_id: gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=True) for gene_id in self.gene_list}
+        elif self.selection == "best_transcript":
+            positions_gene = {gene_id: best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=True) for gene_id in self.gene_list}
+        else:
+            raise AssertionError("Selection variable must be either 'gene' or 'best_transcript'.")
 
         if self.verbose:
             print(f"{Col.HEADER}Footprint are being assigned to genomic coordinates.{Col.ENDC}")
@@ -519,7 +578,7 @@ class RiboSeqAssignment:
         return joblib.load(output_file_name)
 
     @staticmethod
-    def chromosomes_genes_matcher(ensembl_release_object, gene_list):
+    def chromosomes_genes_matcher(gene_info_dictionary, gene_list):
         """
         This script is to assign genes into chromosomes.
         :param ensembl_release_object: Created by ensembl_release_object_creator() function
@@ -527,10 +586,10 @@ class RiboSeqAssignment:
         :return: Dictionary of assigned genes.
         """
         chromosomes = dict()  # Initialize a dictionary to fill up
-        for gene in gene_list:  # For each gene in the gene_list
-            gene_object = ensembl_release_object.gene_by_id(gene)  # Create an instance of Ensembl Gene object
+        for gene_id in gene_list:  # For each gene in the gene_list
+            contig = gene_info_dictionary[gene_id].chromosome
             # Find the chromosome name (contig), add the gene into the relevant list
-            chromosomes[gene_object.contig] = chromosomes.get(gene_object.contig, []) + [gene_object.id]
+            chromosomes[contig] = chromosomes.get(contig, []) + [gene_id]
         return chromosomes
 
     @staticmethod
@@ -623,14 +682,16 @@ class RiboSeqAssignment:
                 try:
                     gene_id_list = chromosome_gene_map[chr_name]  # For each gene in the same chromosome
                 except KeyError:
-                    continue  # Genes which are not among gene_list are skipped here as well.
+                    raise AssertionError("Hoba")
+                    # continue  # Genes which are not among gene_list are skipped here as well.
                     # For example I saw ENSG00000278457, gives disome footprint but it is not among gene_list
                     # chromosome_gene_map is based on gene_list only.
 
                 for gene_id in gene_id_list:
                     pos_genes = positions_gene_map[gene_id]  # Get the genomic positions of the gene
                     # For each position in the gene, look at the footprints_counts, get the number if found, 0 otherwise.
-                    gene_footprint_assignment[gene_id] = gene_footprint_assignment.get(gene_id, []) + [np.array([footprints_counts.get(i, 0) for i in pos_genes])]
+                    assert gene_id not in gene_footprint_assignment, "Error in footprint_counts_to_genes"
+                    gene_footprint_assignment[gene_id] = np.array([footprints_counts.get(i, 0) for i in pos_genes])
 
         # Convert list of np.arrays to np.ndarray. Also set up the dtype as np.int32
         for gene_id in gene_footprint_assignment:
@@ -639,9 +700,6 @@ class RiboSeqAssignment:
 
         return gene_footprint_assignment
 
-# todo: dictionary yerine 3d array yap
-# todo: assigned mapped ayrımı yap isimlendirmede
-
     def calculate_rpm_genes(self):
         return self.total_assigned_gene / self.total_assigned * 10**6
 
@@ -649,7 +707,7 @@ class RiboSeqAssignment:
         return self.total_assigned_gene / self.total_assigned * 10**9 / np.stack([self.gene_lengths] * len(self.sam_paths), axis=1)
 
     def calculate_rpm_positions(self, gene_id):
-        return self.gene_assignments[gene_id] / self.total_assigned * 10**6
+        return self.gene_assignments.get(gene_id, np.zeros(self.gene_lengths[np.where(self.gene_list==gene_id)])) / self.total_assigned * 10**6
 
     def calculate_confidence_interval(self, gene_id, value, confidence=0.95):
         assert value in ["lower", "upper", "mean"]
@@ -659,6 +717,10 @@ class RiboSeqAssignment:
             return mean
         std_n_sqrt_conf = (np.std(rpm, axis=0) / np.sqrt(rpm.shape[0])) * confidence
         return mean - std_n_sqrt_conf if value == "lower" else mean + std_n_sqrt_conf
+
+
+class MatiKaiAssembly:
+    pass
 
 
 class UniprotAnnotation:
@@ -678,7 +740,8 @@ def biomart_mapping(temp_repo_dir, rscript, release=102):
 
     if not os.access(data_path, os.R_OK) or not os.path.isfile(data_path):
         print(f"{Col.HEADER}BiomaRt script is being run: {base_name}.{Col.ENDC}")
-        spr = subprocess.run(f"cd {temp_repo_dir}; {which('RScript')} {rscript} {release} {data_path}", shell=True)
+        r_installation = "RScript" if sys.platform == "darwin" else "Rscript"
+        spr = subprocess.run(f"cd {temp_repo_dir}; {which(r_installation)} {rscript} {release} {data_path}", shell=True)
         assert spr.returncode == 0, f"Error: {rscript}"
 
     return pd.read_table(data_path)
@@ -738,16 +801,27 @@ def sync_dictionaries(dict1, dict2):
     return output_dict1, output_dict2  # Return the filtered dictionaries
 
 
-def gene_cds_ranges(ensembl_release_object, gene_id):
-    cds_ranges = ensembl_release_object.db.query(select_column_names=["start", "end"], feature="CDS", distinct=True,
-                                                 filter_column="gene_id", filter_value=gene_id)
-    return reduce_range_list(cds_ranges)  # Warning: it also sorts!!!
+def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=False):
+    transcript_list = gene_info_dictionary[gene_id].transcripts["ensembl_transcript_id"].to_list()
+    cds_all_ranges = [protein_genome_instance.transcripts[transcript_id][0] for transcript_id in transcript_list]
+    cds_all_ranges = reduce_range_list([j for i in cds_all_ranges for j in i])  # it sorts
+    strand = -1 if protein_genome_instance.transcripts[transcript_list[0]][4] == "-" else 1  # all tx are the same
+    if strand == -1:
+        cds_all_ranges = [[j, i] for i, j in reversed(cds_all_ranges)]  # reverse if at '-'
+    if not make_array:
+        return cds_all_ranges
+    else:
+        return np.concatenate([np.arange(i, j + strand, strand) for i, j in cds_all_ranges])
 
 
-def gene_cds_array(ensembl_release_object, gene_id):
-    cds_ranges = gene_cds_ranges(ensembl_release_object, gene_id)
-    # +1 → both ends should be included.
-    return np.concatenate([np.arange(i, j + 1) for i, j in cds_ranges])
+def best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=False):
+    best_transcript = gene_info_dictionary[gene_id].transcripts.iloc[0][0]  # At least 1 transcript exists
+    cds_ranges = protein_genome_instance.transcripts[best_transcript][0]
+    if not make_array:
+        return cds_ranges
+    else:
+        strand = -1 if protein_genome_instance.transcripts[best_transcript][4] == "-" else 1
+        return np.concatenate([np.arange(i, j + strand, strand) for i, j in cds_ranges])
 
 
 def ensembl_range_sum(ranges):

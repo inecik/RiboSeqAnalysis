@@ -11,6 +11,4 @@ gene3d[gene3d == ""] = NA
 gene3d = na.omit(gene3d)
 gene3d = gene3d[, c(1, 3, 4, 2)]
 
-print(output_path)
 write.table(gene3d, output_path, row.names=FALSE, col.names=TRUE, quote = FALSE, sep = "\t")
-
