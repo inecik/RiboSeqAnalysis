@@ -28,8 +28,9 @@ script_path_infrastructure = __file__
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, exclude_genes=None, ensembl_release=102,
-                 sam_translatome=None, sam_sixtymers=None, riboseq_assign_to="best_transcript", riboseq_assign_at = -1,
+                 sixtymers=None, serb=None, riboseq_assign_to="best_transcript", riboseq_assign_at = -1,
                  include_gene3d=False):
+                # todo: verbose = True for everything
 
         self.temp_repo_dir = temp_repo_dir
         self.exclude_genes = exclude_genes
@@ -37,15 +38,15 @@ class Infrastructre:
 
         self.script_path_infrastructure = script_path_infrastructure
         self.script_path_gene_info_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_database.R"))
-        gene_info_database = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_db, self.ensembl_release)
-
         self.script_path_gene_info_names_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_names.R"))
+        self.script_path_gene_info_uniprot_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_uniprot.R"))
+
+        gene_info_database = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_db, self.ensembl_release)
         gene_info_names = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_names_db, self.ensembl_release)
+        gene_info_uniprot = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_uniprot_db, self.ensembl_release)
 
-        self.gene_list = np.unique(gene_info_database["ensembl_gene_id"].dropna())
-        self.gene_list = np.sort(np.setdiff1d(self.gene_list, self.exclude_genes))
-
-        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names)
+        self.gene_list = sorted(np.unique(gene_info_database["ensembl_gene_id"].dropna()))
+        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot)
 
         ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release)
 
@@ -56,61 +57,24 @@ class Infrastructre:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
             self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero)
 
-        if sam_translatome or sam_sixtymers:
-            self.riboseq_assign_to = riboseq_assign_to
-            self.riboseq_assign_at = riboseq_assign_at
+        # Integrate RiboSeq data
 
-        if sam_translatome:
-            self.translatome = RiboSeqAssignment(sam_translatome, self.temp_repo_dir, self.gene_list, assignment=self.riboseq_assign_at,
-                                                 selection=self.riboseq_assign_to, riboseq_group="translatome",
-                                                 protein_genome_instance=self.protein_genome, gene_info_dictionary=self.gene_info)
+        self.riboseq_assign_to = riboseq_assign_to
+        self.riboseq_assign_at = riboseq_assign_at
 
-        if sam_sixtymers:
-            self.sixtymers = RiboSeqAssignment(sam_sixtymers, self.temp_repo_dir, self.gene_list, assignment=self.riboseq_assign_at,
-                                                 selection=self.riboseq_assign_to, riboseq_group="sixtymers",
-                                                 protein_genome_instance=self.protein_genome, gene_info_dictionary=self.gene_info)
+        if sixtymers: # [translatom_sam, sixtimer_sam]
+            self.riboseq_sixtymers = RiboSeqSixtymers(self.temp_repo_dir, sixtymers[0], sixtymers[1], self.riboseq_assign_at,
+                                                      self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=True, recalculate=False)
+        else:
+            self.sixtymers = None
 
-        if sam_translatome and sam_sixtymers:
-            assert np.all(self.sixtymers.gene_list == self.translatome.gene_list)
-            del self.sixtymers.gene_list, self.translatome.gene_list
-
-        # Uniprot
-        # Conservation
-
-
-    def calculate_stalling_peaks_arpat(self):
-        try:
-            output = dict()
-            translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
-            for ind, gene_id in enumerate(self.gene_list):
-                position_rpm_mean = np.mean(self.sixtymers.calculate_rpm_positions(gene_id), axis=0)
-                normalized_peak_count = np.sum(position_rpm_mean != 0)
-                gene_rpm_mean = translatome_rpm_mean[ind]
-                if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
-                    output[gene_id] = np.nan
-                else:
-                    normalized_rpm = position_rpm_mean / gene_rpm_mean
-                    output[gene_id] = normalized_rpm.argsort()[-5:][::-1] # Arbitrarily 5
-                    # todo: genome position'larını return etsin
-            return output
-        except NameError:
-            print(f"{Col.WARNING}Translatome and/or sixtymers are not defined.{Col.ENDC}")
-
-    def calculate_stalling_peaks_inecik(self):
-        try:
-            output = dict()
-            translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
-            for ind, gene_id in enumerate(self.gene_list):
-                position_rpm_mean = np.mean(self.sixtymers.calculate_rpm_positions(gene_id), axis=0)
-                normalized_peak_count = np.sum(position_rpm_mean != 0)
-                gene_rpm_mean = translatome_rpm_mean[ind]
-                if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
-                    output[gene_id] = np.nan
-                else:
-                    normalized_rpm = position_rpm_mean / gene_rpm_mean
-
-        except NameError:
-            print(f"{Col.WARNING}Translatome and/or sixtymers are not defined.{Col.ENDC}")
+        if serb:  # [[str:name, list:translatome, list:experiment], [...]]
+            self.riboseq_serb = dict()
+            for serb0, serb1, serb2 in serb:
+                self.riboseq_serb[serb1] =  RiboSeqSelective(self.temp_repo_dir, serb1, serb2, serb0, self.riboseq_assign_at,
+                                                             self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=True, recalculate=False)
+            else:
+                self.riboseq_serb = None
 
     def create_gene_matrix(self, gene_id):
         pass
@@ -129,7 +93,10 @@ class Infrastructre:
     # get_riboseq, get_domain, get_conservation gibi function'lar yapılacakGE
 
 
-def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_info_names, overwrite=False, verbose=True):
+
+
+def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_info_names, gene_info_uniprot,
+                             overwrite=False, verbose=True):
     
     output_path = os.path.join(temp_repo_dir, "gene_info_database.joblib")
     if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or overwrite:
@@ -140,7 +107,8 @@ def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_
             progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}")
             gi = gene_info_database[gene_info_database["ensembl_gene_id"] == gene_id]
             gi_names = gene_info_names[gene_info_names["ensembl_gene_id"] == gene_id]
-            output[gene_id] = Gene(gi, gi_names)
+            gi_uniprot = gene_info_uniprot[gene_info_uniprot["ensembl_gene_id"] == gene_id]
+            output[gene_id] = Gene(gi, gi_names, gi_uniprot)
         print(f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
         joblib.dump(output, output_path)
         if verbose:
@@ -154,11 +122,12 @@ def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_
 
 class Gene:
 
-    def __init__(self, one_gene_df, one_gene_names):
+    def __init__(self, one_gene_df, one_gene_names, one_gene_uniprot):
 
         temp_gene_id = one_gene_df["ensembl_gene_id"].unique()
         self.gene_id = temp_gene_id[0]
         self.gene_names = np.unique(np.concatenate((one_gene_names["external_gene_name"].dropna(), one_gene_names["external_synonym"].dropna())))
+        self.uniprot_ids = np.unique(np.concatenate((one_gene_uniprot["uniprotswissprot"].dropna(), one_gene_uniprot["uniprotsptrembl"].dropna())))
         temp_chromosome = np.unique(np.array(one_gene_df["chromosome_name"], dtype=str))
         self.chromosome = str(temp_chromosome[0])
         temp_strand = one_gene_df["strand"].unique()
@@ -170,8 +139,7 @@ class Gene:
         assert all([len(i) == 1 for i in [temp_chromosome, temp_strand, temp_start, temp_end]])
         self.transcripts = self.prioritize_transcripts(one_gene_df)
 
-    @staticmethod
-    def prioritize_transcripts(gene_df):
+    def prioritize_transcripts(self, gene_df):
         transcripts = gene_df.drop(["ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand"], axis=1).drop_duplicates()
         transcripts["transcript_appris"] = transcripts["transcript_appris"].replace(
             ["alternative1", "alternative2"], ["renamed_alternative1", "renamed_alternative2"])
@@ -190,12 +158,11 @@ class Gene:
 class ProteinGenome:
 
     def __init__(self, temp_repo_dir, transcript_list, ensembl_release_object, verbose=True, recalculate=False):
-        self.transcript_list = np.sort(transcript_list)
+        self.transcript_list = sorted(transcript_list)
         self.ensembl_release = ensembl_release_object.annotation_version
         self.temp_repo_dir = temp_repo_dir
         self.verbose = verbose
-        self.file_name = "protein_genome_instance.joblib"
-        self.output_file_name = os.path.join(self.temp_repo_dir, self.file_name)
+        self.output_file_name = os.path.join(self.temp_repo_dir, "protein_genome_instance.joblib")
         self.recalculate = recalculate
 
         try:
@@ -205,16 +172,14 @@ class ProteinGenome:
                 raise AssertionError
             loaded_content = self.load_joblib(self.output_file_name, self.verbose)
             consistent_with = all([
-                (self.transcript_list == loaded_content.transcript_list).all(),
-                self.temp_repo_dir == loaded_content.temp_repo_dir,
+                self.transcript_list == loaded_content.transcript_list,
                 self.ensembl_release == loaded_content.ensembl_release,
-                self.file_name == loaded_content.file_name,
-                self.output_file_name == loaded_content.output_file_name,
+                os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
             ])
             if not consistent_with:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
                 raise AssertionError
-            self.transcripts = loaded_content.transcripts
+            self.db = loaded_content.db
         except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
             self.calculate_transcript_mapping(ensembl_release_object)
@@ -332,7 +297,7 @@ class ProteinGenome:
                 progress_bar(ind, len(self.transcript_list) - 1)
             transcript_object = ensembl_release_object.transcript_by_id(transcript_id)
             output[transcript_id] = self.consistent_coding_ranges(transcript_object)
-        self.transcripts = output
+        self.db = output
 
     def save_joblib(self):
         # Write down the output dictionary and list as Joblib object for convenience in later uses.
@@ -408,12 +373,8 @@ class EnsemblDomain:
                 raise AssertionError
             loaded_content = self.load_joblib(self.output_file_name, self.base_name, self.verbose)
             consistent_with = all([
-                self.temp_repo_dir == loaded_content.temp_repo_dir,
-                self.rscript == loaded_content.rscript,
                 self.base_name == loaded_content.base_name,
-                self.data_path == loaded_content.data_path,
-                self.ensembl_release == loaded_content.ensembl_release,
-                self.output_file_name == loaded_content.output_file_name,
+                self.ensembl_release == loaded_content.ensembl_release
             ])
             if not consistent_with:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
@@ -440,7 +401,7 @@ class EnsemblDomain:
                 progress_bar(ind, len(protein_ids) - 1)
             transcript_id = ensembl_release_object.transcript_id_of_protein_id(protein_id)
             coordinates_ranges.append(protein_genome_instance.protein2genome(transcript_id, domain_start, domain_end))
-            coordinates_contig.append(protein_genome_instance.transcripts[transcript_id][3])
+            coordinates_contig.append(protein_genome_instance.db[transcript_id][3])
         self.df["genome_chromosome"] = coordinates_contig
         self.df["genome_coordinate"] = coordinates_ranges
 
@@ -474,13 +435,14 @@ class EnsemblDomain:
 
 class RiboSeqAssignment:
 
-    def __init__(self, sam_paths, temp_repo_dir, gene_list, assignment, selection, riboseq_group,
-                 protein_genome_instance, gene_info_dictionary, verbose=True, recalculate=False):
+    def __init__(self, sam_paths: list, temp_repo_dir: str, assignment: int, selection: str, riboseq_group: str,
+                 protein_genome_instance:ProteinGenome, gene_info_dictionary:dict, verbose=True, recalculate=False):
         # :param riboseq_group: String to identify the RiboSeq experiment annotation; like "translatome" or "60mers"
-        self.sam_paths = np.sort(sam_paths)
+        self.sam_paths = sorted(sam_paths)
         self.temp_repo_dir = temp_repo_dir
         self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{selection}.joblib")
-        self.gene_list = gene_list
+        self.gene_list = sorted(gene_info_dictionary.keys())
+        self.exclude_gene_list = []
         self.assignment = assignment
         self.verbose = verbose
         self.selection = selection
@@ -494,18 +456,17 @@ class RiboSeqAssignment:
                 raise AssertionError
             loaded_content = self.load_joblib(self.riboseq_group, self.output_file_name, self.verbose)
             consistent_with = all([
-                (self.sam_paths == loaded_content.sam_paths).all(),
-                self.temp_repo_dir == loaded_content.temp_repo_dir,
-                self.output_file_name == loaded_content.output_file_name,
-                self.selection == loaded_content.selection,
-                self.riboseq_group == loaded_content.riboseq_group,
-                (self.gene_list == loaded_content.gene_list).all(),
-                self.assignment == loaded_content.assignment
+                all([os.path.basename(s) == os.path.basename(l) for s, l in zip(self.sam_paths, loaded_content.sam_paths)]),
+                os.path.basename(self.output_file_name) == os.path.basename(self.output_file_name),
+                self.assignment == loaded_content.assignment,
+                len(self.gene_list) == len(loaded_content.gene_list),
+                all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),
             ])
             if not consistent_with:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
                 raise AssertionError
             self.gene_assignments = loaded_content.gene_assignments
+
             self.gene_lengths = loaded_content.gene_lengths
             self.total_assigned_gene = loaded_content.total_assigned_gene
             self.total_assigned = loaded_content.total_assigned
@@ -513,10 +474,20 @@ class RiboSeqAssignment:
         except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Gene assignments are being calculated: {self.riboseq_group}{Col.ENDC}")
             self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary)
-            self.gene_lengths = np.array([int(self.gene_assignments[i].shape[1]) if i in self.gene_assignments else np.nan for i in self.gene_list])
-            self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) if i in self.gene_assignments else np.zeros(len(self.sam_paths)) for i in self.gene_list], dtype=np.int64)
-            self.total_assigned = int(np.sum(self.total_assigned_gene))
+            self.gene_lengths = np.array([int(self.gene_assignments[i].shape[1]) for i in self.gene_list], dtype=int)
+            self.exclude_genes_calculate_stats(self.exclude_gene_list)
             self.save_joblib()
+
+    def exclude_genes_calculate_stats(self, exclude_gene_list:list):
+        for gene_id in exclude_gene_list:
+            target_shape = self.gene_assignments[gene_id].shape
+            empty_matrix = np.empty(target_shape)
+            empty_matrix.fill(np.nan)
+            self.gene_assignments[gene_id] = empty_matrix
+
+        self.exclude_gene_list = self.exclude_gene_list.extend(exclude_gene_list)
+        self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) for i in self.gene_list], dtype=int)
+        self.total_assigned = int(np.sum(self.total_assigned_gene))
 
     def get_assigned_read_mapped_read_all(self):
         mapped_read = 0
@@ -719,9 +690,117 @@ class RiboSeqAssignment:
         return mean - std_n_sqrt_conf if value == "lower" else mean + std_n_sqrt_conf
 
 
-class MatiKaiAssembly:
-    pass
+class RiboSeqExperiment:
 
+    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+
+        self.temp_repo_dir = temp_repo_dir
+        self.sam_paths_translatome = sam_paths_translatome
+        self.sam_paths_experiment = sam_paths_experiment
+        self.name_experiment = name_experiment
+        self.riboseq_assign_to = selection
+        self.riboseq_assign_at = assignment
+        self.exclude_genes = exclude_genes
+        self.verbose = verbose
+        self.recalculate = recalculate
+
+        self.translatome = RiboSeqAssignment(self.sam_paths_translatome, self.temp_repo_dir, self.riboseq_assign_at,
+                                             self.riboseq_assign_to, "translatome", protein_genome_instance, gene_info_dictionary)
+        self.experiment = RiboSeqAssignment(self.sam_paths_experiment, self.temp_repo_dir, self.riboseq_assign_at,
+                                             self.riboseq_assign_to, self.name_experiment, protein_genome_instance, gene_info_dictionary)
+
+        if exclude_genes:
+            self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
+            self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
+
+        self.translatome.gene_list = self.translatome.gene_list
+        del self.translatome.exclude_gene_list, self.experiment.exclude_gene_list
+        del self.translatome.gene_list, self.experiment.gene_list
+
+    def normalized_rpm_for_positions(self, min_gene_rpm_translatome=0, min_gene_rpkm_translatome=0):
+        output = dict()
+        translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
+        translatome_rpkm_mean = np.mean(self.translatome.calculate_rpkm_genes(), axis=1)
+        for ind, gene_id in enumerate(self.translatome.gene_list):  # gene_info_dictionary.keys()?
+            position_rpm_mean = np.mean(self.experiment.calculate_rpm_positions(gene_id), axis=0)
+            gene_rpm_mean = translatome_rpm_mean[ind]
+            normalized_rpm = position_rpm_mean / gene_rpm_mean
+            if gene_rpm_mean < min_gene_rpm_translatome or translatome_rpkm_mean[ind] < min_gene_rpkm_translatome:
+                output[gene_id] = np.nan
+            else:
+                output[gene_id] = normalized_rpm
+        return output
+
+class RiboSeqSixtymers(RiboSeqExperiment):
+
+    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, assignment: int,  # name_experiment: str,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, "sixtymers", assignment,
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
+
+
+    def calculate_stalling_peaks_arpat(self):
+        output = dict()
+        translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
+        for ind, gene_id in enumerate(self.translatome.gene_list):  # gene_info_dictionary.keys()?
+            position_rpm_mean = np.mean(self.experiment.calculate_rpm_positions(gene_id), axis=0)
+            normalized_peak_count = np.sum(position_rpm_mean != 0)
+            gene_rpm_mean = translatome_rpm_mean[ind]
+            if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
+                output[gene_id] = np.nan
+            else:
+                normalized_rpm = position_rpm_mean / gene_rpm_mean
+                output[gene_id] = normalized_rpm.argsort()[-5:][::-1] # Arbitrarily 5
+                # todo: genome position'larını return etsin
+        return output
+
+    def calculate_stalling_peaks_inecik(self):
+        pass  # todo
+
+
+class RiboSeqSelective(RiboSeqExperiment):
+
+    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
+
+    def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
+        normalized_rpm = self.normalized_rpm_for_positions(min_gene_rpm_translatome, min_gene_rpkm_translatome)
+        output = dict()
+        for ind, gene_id in enumerate(normalized_rpm.keys()):
+            gene_normalized_rpm = output[gene_id]
+            if np.isnan(gene_normalized_rpm):
+                output[gene_id] = np.nan
+            else:
+                output[gene_id] = np.where(normalized_rpm[gene_id] > normalized_rpm_threshold)
+            # todo: genome position'larını return etsin
+        return output
+
+
+class MatiKaiAssembly:
+
+    def model_base(self, x, p):
+        return p
+
+    def model_ssig(self, x, i_init, i_max, a, i_mid):
+        return (i_max - i_init) / (1 + np.exp(-a * (x - i_mid))) + i_init
+
+    def model_dsig(self, x, i_init, i_max, i_final, a_1, a_2, i_mid, i_dist):
+        return ((i_max - i_init) / (1 + np.exp(-a_1 * (x - i_mid))) + i_init) * ((1 - i_final) / (1 + np.exp(-a_2 * (x - (i_mid + i_dist)))) + i_final)
+
+    def riboseq_assignment_instance_to_h5(self, riboseq_assignment_instance):
+        pass
+
+    def sigmoid_fitting_controller(self):
+        pass
+
+    def read_rdata(self):
+        pass
+
+    def calculate_curves(self):
+        pass
 
 class UniprotAnnotation:
 
@@ -803,9 +882,9 @@ def sync_dictionaries(dict1, dict2):
 
 def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=False):
     transcript_list = gene_info_dictionary[gene_id].transcripts["ensembl_transcript_id"].to_list()
-    cds_all_ranges = [protein_genome_instance.transcripts[transcript_id][0] for transcript_id in transcript_list]
+    cds_all_ranges = [protein_genome_instance.db[transcript_id][0] for transcript_id in transcript_list]
     cds_all_ranges = reduce_range_list([j for i in cds_all_ranges for j in i])  # it sorts
-    strand = -1 if protein_genome_instance.transcripts[transcript_list[0]][4] == "-" else 1  # all tx are the same
+    strand = -1 if protein_genome_instance.db[transcript_list[0]][4] == "-" else 1  # all tx are the same
     if strand == -1:
         cds_all_ranges = [[j, i] for i, j in reversed(cds_all_ranges)]  # reverse if at '-'
     if not make_array:
@@ -816,11 +895,11 @@ def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make
 
 def best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=False):
     best_transcript = gene_info_dictionary[gene_id].transcripts.iloc[0][0]  # At least 1 transcript exists
-    cds_ranges = protein_genome_instance.transcripts[best_transcript][0]
+    cds_ranges = protein_genome_instance.db[best_transcript][0]
     if not make_array:
         return cds_ranges
     else:
-        strand = -1 if protein_genome_instance.transcripts[best_transcript][4] == "-" else 1
+        strand = -1 if protein_genome_instance.db[best_transcript][4] == "-" else 1
         return np.concatenate([np.arange(i, j + strand, strand) for i, j in cds_ranges])
 
 
@@ -896,6 +975,62 @@ class Col:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
+
+
+def gtf_cds_parser(gtf_path, verbose=False):
+    """
+    This is to convert gtf file into list of dictionary elements.
+    :param verbose: Boolean. Report or not report the progress.
+    :param gtf_path: String. Path of the gtf or gtf.gz file
+    :return: List of dictionaries for each entry
+    """
+    # Column names for GTF file. Source: https://www.ensembl.org/info/website/upload/gff.html
+    columns = ["seqname", "source", "feature", "start", "end", "score", "strand", "frame"]
+    assert os.path.splitext(gtf_path)[1] == ".gtf"
+    with open(gtf_path, "r") as gtf_handle:  # Open and read the file
+        gtf = gtf_handle.readlines()
+    # Remove the titles, strip the trailing white spaces, split the line into cells
+    gtf = [i.strip().split('\t') for i in gtf if not i.startswith('#')]
+    output = list()
+    filter_columns = ["protein_id", "transcript_id", "gene_name", "start", "end", "strand", "frame", "seqname", "exon_number"]
+    for ind, the_line in enumerate(gtf):  # Parse the entries
+        # Parse the attributes column, column 9, of each line
+        # noinspection PyTypeChecker
+        entry = dict(  # Get the result as dictionary
+            [[k, l.replace("\"", "")] for k, l in  # 4) Remove double quote from value
+             [j.strip().split(" ", 1) for j in  # 3) For each attribute split key from value
+              the_line[8].split(';')  # 1) Split first with ';'
+              if j]])  # 2) See if element contains anything (last character is ';', to remove the artifact of it)
+        entry.update(dict(zip(columns, the_line[:8])))  # Append dictionary with remaining information (Info in columns)
+        # noinspection PyTypeChecker
+        if entry["feature"] == "CDS":
+            output.append([entry[ft] if ft in entry else np.nan for ft in filter_columns])
+        if verbose and (ind % 100 == 0 or ind == len(gtf) - 1):  # Show the progress if 'verbose' is True
+            progress_bar(ind, len(gtf) - 1)
+    return pd.DataFrame(output, columns=filter_columns)
+
+
+def download_gtf_refseq(temp_repo_dir, data_url=None):
+    """
+    Function is to download or find the file in temp_repo_dir.
+    :param temp_repo_dir: String. Directory to download or find the file
+    :return: String. Path of gtf or gtf.gz
+    """
+    if not data_url:
+        data_url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.38_GRCh38.p12/" \
+                   "GCF_000001405.38_GRCh38.p12_genomic.gtf.gz"
+    gtf_file = os.path.basename(data_url)  # File name in the FTP server
+    # Paths to download the database or look for the database if it already exists
+    gtf_gz_path = os.path.join(temp_repo_dir, gtf_file)  # Compressed .gz format
+    gtf_path = os.path.splitext(gtf_gz_path)[0]  # Not compressed
+    if os.access(gtf_path, os.R_OK) or os.path.isfile(gtf_path):  # Check if the file exist
+        return gtf_path  # Return the path if it exist
+    else:  # Download otherwise
+        subprocess.run((f"cd {temp_repo_dir}; "
+                        f"curl -L -R -O {data_url}; "
+                        f"gzip -d {gtf_file}"), shell=True)
+        assert os.path.isfile(gtf_path) and os.access(gtf_path, os.R_OK)
+        return gtf_path  # Return the compressed file
 
 
 if __name__ == '__main__':
