@@ -14,6 +14,9 @@ import itertools
 import joblib
 import numpy as np
 import pandas as pd
+from scipy import stats
+from scipy.optimize import minimize
+from statsmodels.stats.proportion import proportion_confint
 import pyensembl
 import math
 import pysam
@@ -28,13 +31,13 @@ script_path_infrastructure = __file__
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, exclude_genes=None, ensembl_release=102,
-                 sixtymers=None, serb=None, riboseq_assign_to="best_transcript", riboseq_assign_at = -1,
-                 include_gene3d=False):
-                # todo: verbose = True for everything
+                 sixtymers=None, serb=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-1,
+                 include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
         self.exclude_genes = exclude_genes
         self.ensembl_release = ensembl_release
+        self.verbose = verbose
 
         self.script_path_infrastructure = script_path_infrastructure
         self.script_path_gene_info_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_database.R"))
@@ -46,33 +49,33 @@ class Infrastructre:
         gene_info_uniprot = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_uniprot_db, self.ensembl_release)
 
         self.gene_list = sorted(np.unique(gene_info_database["ensembl_gene_id"].dropna()))
-        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot)
+        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot, verbose=self.verbose)
 
         ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release)
 
         transcript_list = np.unique(gene_info_database["ensembl_transcript_id"].dropna())
-        self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero)
+        self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero, verbose=self.verbose)
 
         if include_gene3d:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
-            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero)
+            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero, verbose=self.verbose)
 
         # Integrate RiboSeq data
 
         self.riboseq_assign_to = riboseq_assign_to
         self.riboseq_assign_at = riboseq_assign_at
 
-        if sixtymers: # [translatom_sam, sixtimer_sam]
+        if sixtymers:  # [translatome_sam, sixtymer_sam]
             self.riboseq_sixtymers = RiboSeqSixtymers(self.temp_repo_dir, sixtymers[0], sixtymers[1], self.riboseq_assign_at,
-                                                      self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=True, recalculate=False)
+                                                      self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=self.verbose)
         else:
-            self.sixtymers = None
+            self.riboseq_sixtymers = None
 
         if serb:  # [[str:name, list:translatome, list:experiment], [...]]
             self.riboseq_serb = dict()
             for serb0, serb1, serb2 in serb:
-                self.riboseq_serb[serb1] =  RiboSeqSelective(self.temp_repo_dir, serb1, serb2, serb0, self.riboseq_assign_at,
-                                                             self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=True, recalculate=False)
+                self.riboseq_serb[serb0] = RiboSeqSelective(self.temp_repo_dir, serb1, serb2, serb0, self.riboseq_assign_at,
+                                                             self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=self.verbose)
             else:
                 self.riboseq_serb = None
 
@@ -93,11 +96,9 @@ class Infrastructre:
     # get_riboseq, get_domain, get_conservation gibi function'lar yapılacakGE
 
 
-
-
 def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_info_names, gene_info_uniprot,
                              overwrite=False, verbose=True):
-    
+
     output_path = os.path.join(temp_repo_dir, "gene_info_database.joblib")
     if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or overwrite:
         output = dict()
@@ -314,7 +315,7 @@ class ProteinGenome:
         return joblib.load(output_file_name)
 
     def protein2genome(self, transcript_id, start, end):
-        transcript = self.transcripts[transcript_id]
+        transcript = self.transcript_list[transcript_id]
 
         assert 1 <= start <= end <= len(transcript[1]), f"Wrong range for transcript {transcript_id}: min: 1, max: {len(transcript[1])}"
         start_nt = start * 3 - 3  # -1: convert python index
@@ -421,17 +422,16 @@ class EnsemblDomain:
 
 
 # TODO: LIST
-# uzaktan erişimin mümkün olup olmadığını sor: IT guy'a
-# bol bol açıklama ekle. bütün koda (protein_sequence asıl: nedenini açıkla)
-# uniprot ve conservation'u tatilde yap
-# gene class'ını bitir.
 # co-co site'ı hesaplayan fitting şeyi yaz: coco_site'ı eklemlendir.
-# TODO: neden link_pair aktif ki zaten
-# paired end yap sadece star ile, sonra -1'ine assign et sadece.
-# riboseqassignment' class assignment'tan sonra 15 nt geriye gitsin
-# TODO: TOMORROW
-# Link pair'siz paired end yazdır!
-# protein_coding'i kaldırarak yazdır !
+# fitting'de gerçekten raw sayılar mı yoksa rpkm falan mı?
+# makaledeki şeyleri eksiksiz eklemlendir (rpkm, ci, rolling window etc.)
+# arpat yöntemine göz at, doğru yazıldığından emin ol
+# birkaç peak detection tool'u ekle
+# conservation'u ekle
+# gene class'ını bitir.
+# uniprot'u eklemeden önce infrastructure'ı bitir ve buralara
+#       bol bol açıklama ekle. bütün koda (protein_sequence asıl: nedenini açıkla)
+
 
 class RiboSeqAssignment:
 
@@ -466,7 +466,6 @@ class RiboSeqAssignment:
                 print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
                 raise AssertionError
             self.gene_assignments = loaded_content.gene_assignments
-
             self.gene_lengths = loaded_content.gene_lengths
             self.total_assigned_gene = loaded_content.total_assigned_gene
             self.total_assigned = loaded_content.total_assigned
@@ -552,7 +551,7 @@ class RiboSeqAssignment:
     def chromosomes_genes_matcher(gene_info_dictionary, gene_list):
         """
         This script is to assign genes into chromosomes.
-        :param ensembl_release_object: Created by ensembl_release_object_creator() function
+        :param gene_info_dictionary: Pass
         :param gene_list: List of genes to assign chromosomes
         :return: Dictionary of assigned genes.
         """
@@ -680,7 +679,7 @@ class RiboSeqAssignment:
     def calculate_rpm_positions(self, gene_id):
         return self.gene_assignments.get(gene_id, np.zeros(self.gene_lengths[np.where(self.gene_list==gene_id)])) / self.total_assigned * 10**6
 
-    def calculate_confidence_interval(self, gene_id, value, confidence=0.95):
+    def calculate_confidence_interval_DEPRECATED(self, gene_id, value, confidence=0.95):
         assert value in ["lower", "upper", "mean"]
         rpm = self.calculate_rpm_positions(gene_id)
         mean = np.mean(rpm, axis=0)
@@ -779,28 +778,77 @@ class RiboSeqSelective(RiboSeqExperiment):
         return output
 
 
-class MatiKaiAssembly:
+class RiboSeqCoco(RiboSeqExperiment):
+    pass
 
-    def model_base(self, x, p):
+
+class BinomialFitting:
+
+    def __init__(self, x, disome, monosome):
+        self.x_data = x  # 1,2,3,4,5...
+        self.disome = disome  # 0,0,13,4,0...
+        self.monosome = monosome
+        assert self.x_data.shape == self.disome.shape == self.monosome.shape, "Shapes do not match. In BinomialFitting."
+        self.n_trial = self.disome + self.monosome
+
+    @staticmethod
+    def model_base(x, p):
         return p
 
-    def model_ssig(self, x, i_init, i_max, a, i_mid):
+    @staticmethod
+    def model_ssig(x, i_init, i_max, a, i_mid):
         return (i_max - i_init) / (1 + np.exp(-a * (x - i_mid))) + i_init
 
-    def model_dsig(self, x, i_init, i_max, i_final, a_1, a_2, i_mid, i_dist):
+    @staticmethod
+    def model_dsig(x, i_init, i_max, i_final, a_1, a_2, i_mid, i_dist):
         return ((i_max - i_init) / (1 + np.exp(-a_1 * (x - i_mid))) + i_init) * ((1 - i_final) / (1 + np.exp(-a_2 * (x - (i_mid + i_dist)))) + i_final)
 
-    def riboseq_assignment_instance_to_h5(self, riboseq_assignment_instance):
-        pass
+    def neg_log_likelihood_base(self,param):
+        y_predicted = self.model_base(self.x_data, *param)
+        log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
+        return log_likelihood
 
-    def sigmoid_fitting_controller(self):
-        pass
+    def neg_log_likelihood_ssig(self,param):
+        y_predicted = self.model_ssig(self.x_data, *param)
+        log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
+        return log_likelihood
 
-    def read_rdata(self):
-        pass
+    def neg_log_likelihood_dsig(self, param):
+        y_predicted = self.model_dsig(self.x_data, *param)
+        negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
+        return negative_log_likelihood
 
-    def calculate_curves(self):
-        pass
+    def minimize_models(self):
+        settings = {"ftol": 1e-9, 'maxiter': 10000}
+        results_base = minimize(self.neg_log_likelihood_base, method="SLSQP", options=settings,
+                                x0=np.array([0.5]),
+                                bounds=((0,1),))
+        results_ssig = minimize(self.neg_log_likelihood_ssig, method="SLSQP", options=settings,
+                                x0=np.array([0.5, 0.5, 0.25, int(len(self.x_data)/2)]),
+                                # From paper:
+                                bounds=((0, 1), (0, 1), (0, 0.5), (1, len(self.x_data))))
+        results_dsig = minimize(self.neg_log_likelihood_dsig, method="SLSQP", options=settings,
+                                x0=np.array([0.5, 0.5, 0.5, 0.25, -0.25, int(len(self.x_data) / 2), int(len(self.x_data) / 2)]),
+                                # From paper:
+                                bounds=((0, 1), (0, 1), (0, 1), (0, 0.5), (-0.5, 0), (1, len(self.x_data)), (1, len(self.x_data))))
+        return results_base, results_ssig, results_dsig
+
+    def calculate_BIC(self, minimized_result):  # Bayesian Information Criterion
+        # BIC = -2 * LL + log(N) * k
+        # Where log() has the base-e called the natural logarithm, LL is the log-likelihood of the model, N is the number of examples in the training dataset, and k is the number of parameters in the model.
+        # The score as defined above is minimized, e.g. the model with the lowest BIC is selected.
+        k = len(minimized_result.x)
+        LL = -minimized_result.fun
+        N = len(self.x_data)
+        return -2 * LL + np.log(N) * k
+
+    def select_correct_model(self):
+        minimized_results = self.minimize_models()
+        bic = [self.calculate_BIC(i) for i in minimized_results]
+        winner = sorted(zip(bic, ["base", "ssig", "dsig"], minimized_results))[0]
+        return winner[1], winner[2].x
+
+    # p = BinomialFitting(np.arange(1,100), np.arange(99), np.ones(99)*100)
 
 class UniprotAnnotation:
 
@@ -1033,19 +1081,19 @@ def download_gtf_refseq(temp_repo_dir, data_url=None):
         return gtf_path  # Return the compressed file
 
 
-if __name__ == '__main__':
-    sam_paths_translatome = [
-        "/Users/kemalinecik/Documents/dropbox/TT1.sam",
-        "/Users/kemalinecik/Documents/dropbox/TT2.sam",
-    ]
-    sam_paths_sixtymers = [
-        "/Users/kemalinecik/Documents/dropbox/Rep1.sam",
-        "/Users/kemalinecik/Documents/dropbox/Rep2.sam",
-        "/Users/kemalinecik/Documents/dropbox/NoPK.sam"
-    ]
-    exclude_genes = np.array(["ENSG00000160789"])
-    temp_repo_dir = "/Users/kemalinecik/Documents/dropbox"
-    Infrastructre(temp_repo_dir, exclude_genes)
+# if __name__ == '__main__':
+#     sam_paths_translatome = [
+#         "/Users/kemalinecik/Documents/dropbox/TT1.sam",
+#         "/Users/kemalinecik/Documents/dropbox/TT2.sam",
+#     ]
+#     sam_paths_sixtymers = [
+#         "/Users/kemalinecik/Documents/dropbox/Rep1.sam",
+#         "/Users/kemalinecik/Documents/dropbox/Rep2.sam",
+#         "/Users/kemalinecik/Documents/dropbox/NoPK.sam"
+#     ]
+#     exclude_genes = np.array(["ENSG00000160789"])
+#     temp_repo_dir = "/Users/kemalinecik/Documents/dropbox"
+#     Infrastructre(temp_repo_dir, exclude_genes)
 
 
 # End
