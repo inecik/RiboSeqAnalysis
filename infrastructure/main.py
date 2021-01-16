@@ -23,6 +23,7 @@ import pysam
 from shutil import which
 from Bio.Seq import translate
 from Bio import pairwise2
+import matplotlib.pyplot as plt
 
 
 script_path_infrastructure = __file__
@@ -30,8 +31,8 @@ script_path_infrastructure = __file__
 
 class Infrastructre:
 
-    def __init__(self, temp_repo_dir, exclude_genes=None, ensembl_release=102,
-                 sixtymers=None, serb=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-1,
+    def __init__(self, temp_repo_dir, exclude_genes=list(), ensembl_release=102,
+                 sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-1,
                  include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
@@ -71,13 +72,20 @@ class Infrastructre:
         else:
             self.riboseq_sixtymers = None
 
-        if serb:  # [[str:name, list:translatome, list:experiment], [...]]
+        if serb:  # [[str:name, str:translatome_sam, str:experiment_sam], [...]]
             self.riboseq_serb = dict()
             for serb0, serb1, serb2 in serb:
                 self.riboseq_serb[serb0] = RiboSeqSelective(self.temp_repo_dir, serb1, serb2, serb0, self.riboseq_assign_at,
                                                              self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=self.verbose)
             else:
                 self.riboseq_serb = None
+
+        if coco:  # [monosome_sam, disome_sam]
+            self.riboseq_coco = RiboSeqCoco(self.temp_repo_dir, coco[0], coco[1], self.riboseq_assign_at,
+                                            self.riboseq_assign_to, self.protein_genome, self.gene_info,
+                                            exclude_genes=self.exclude_genes, verbose=self.verbose)
+        else:
+            self.riboseq_coco = None
 
     def create_gene_matrix(self, gene_id):
         pass
@@ -315,7 +323,7 @@ class ProteinGenome:
         return joblib.load(output_file_name)
 
     def protein2genome(self, transcript_id, start, end):
-        transcript = self.transcript_list[transcript_id]
+        transcript = self.db[transcript_id]
 
         assert 1 <= start <= end <= len(transcript[1]), f"Wrong range for transcript {transcript_id}: min: 1, max: {len(transcript[1])}"
         start_nt = start * 3 - 3  # -1: convert python index
@@ -420,18 +428,20 @@ class EnsemblDomain:
             print(f"{Col.HEADER}Ensembl database instance found for {base_name} in path: {output_file_name}{Col.ENDC}")
         return joblib.load(output_file_name)
 
+# TODO: co-co site'ı hesaplayan fitting şeyi yaz: coco_site'ı eklemlendir.
+#   fitting'de gerçekten raw sayılar mı yoksa rpkm falan mı?
+#   makaledeki şeyleri eksiksiz eklemlendir (rpkm, ci, rolling window etc.)
+#   lowCI highCI falan hesapla, kolaysa metagene'i de eklemlendir değilse boşver
+#   arpat yöntemine göz at, doğru yazıldığından emin ol
+#   birkaç peak detection tool'u ekle
+#   conservation'u ekle
+#   gene class'ını bitir.
+#   uniprot'u eklemeden önce infrastructure'ı bitir ve buralara
+#   bol bol açıklama ekle. bütün koda (protein_sequence asıl: nedenini açıkla)
 
-# TODO: LIST
-# co-co site'ı hesaplayan fitting şeyi yaz: coco_site'ı eklemlendir.
-# fitting'de gerçekten raw sayılar mı yoksa rpkm falan mı?
-# makaledeki şeyleri eksiksiz eklemlendir (rpkm, ci, rolling window etc.)
-# arpat yöntemine göz at, doğru yazıldığından emin ol
-# birkaç peak detection tool'u ekle
-# conservation'u ekle
-# gene class'ını bitir.
-# uniprot'u eklemeden önce infrastructure'ı bitir ve buralara
-#       bol bol açıklama ekle. bütün koda (protein_sequence asıl: nedenini açıkla)
-
+# TODO: SORU: Sadece protein coding mi, yoksa her şey mi?
+# şu anda bütün genleri alıyor rrna falan dahil, bu rpkm'i yapay olarak arttıracaktır..
+# alignment'da değil sadece burada protein-coding only demeliyiz bence. en başta infrastructure'ı oluştururken
 
 class RiboSeqAssignment:
 
@@ -442,7 +452,7 @@ class RiboSeqAssignment:
         self.temp_repo_dir = temp_repo_dir
         self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{selection}.joblib")
         self.gene_list = sorted(gene_info_dictionary.keys())
-        self.exclude_gene_list = []
+        self.exclude_gene_list = list()
         self.assignment = assignment
         self.verbose = verbose
         self.selection = selection
@@ -484,7 +494,7 @@ class RiboSeqAssignment:
             empty_matrix.fill(np.nan)
             self.gene_assignments[gene_id] = empty_matrix
 
-        self.exclude_gene_list = self.exclude_gene_list.extend(exclude_gene_list)
+        self.exclude_gene_list.extend(exclude_gene_list)
         self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) for i in self.gene_list], dtype=int)
         self.total_assigned = int(np.sum(self.total_assigned_gene))
 
@@ -524,9 +534,6 @@ class RiboSeqAssignment:
             print(f"{Col.HEADER}Footprint are being assigned to genomic coordinates.{Col.ENDC}")
         # Assign footprints to genomic positions
         footprint_genome_assignment_list = [self.footprint_assignment(sam_path, assignment=self.assignment, verbose=self.verbose) for sam_path in self.sam_paths]
-        # Remove chromosomes which does not contain footprint assignment, or which does not contain genes
-        for i in range(len(footprint_genome_assignment_list)):
-            chromosome_gene, footprint_genome_assignment_list[i] = sync_dictionaries(chromosome_gene, footprint_genome_assignment_list[i])
 
         if self.verbose:
             print(f"{Col.HEADER}Footprint counts are being calculated and assigned to genes.{Col.ENDC}")
@@ -652,21 +659,33 @@ class RiboSeqAssignment:
                 try:
                     gene_id_list = chromosome_gene_map[chr_name]  # For each gene in the same chromosome
                 except KeyError:
-                    raise AssertionError("Hoba")
-                    # continue  # Genes which are not among gene_list are skipped here as well.
-                    # For example I saw ENSG00000278457, gives disome footprint but it is not among gene_list
-                    # chromosome_gene_map is based on gene_list only.
+                    continue
+                    # Footprints, which are not mapped to a contig that has a gene on it, are excluded.
 
                 for gene_id in gene_id_list:
                     pos_genes = positions_gene_map[gene_id]  # Get the genomic positions of the gene
+
                     # For each position in the gene, look at the footprints_counts, get the number if found, 0 otherwise.
-                    assert gene_id not in gene_footprint_assignment, "Error in footprint_counts_to_genes"
-                    gene_footprint_assignment[gene_id] = np.array([footprints_counts.get(i, 0) for i in pos_genes])
+                    temp_assignments = np.array([footprints_counts.get(i, 0) for i in pos_genes])
+
+                    # Create an empty matrix to fill with raw counts, which originate from different replicates
+                    if gene_id not in gene_footprint_assignment:
+                        gene_footprint_assignment[gene_id] = np.zeros((len(footprint_genome_assignment_list),len(temp_assignments)),)
+                    # Make sure the line is not filled previously
+                    assert np.max(gene_footprint_assignment[gene_id][ind_assignment]) == 0, "Error in footprint_counts_to_genes: Multiple genes"
+                    gene_footprint_assignment[gene_id][ind_assignment] = temp_assignments
 
         # Convert list of np.arrays to np.ndarray. Also set up the dtype as np.int32
         for gene_id in gene_footprint_assignment:
-            assert all([np.max(i) < max_possible for i in gene_footprint_assignment[gene_id]]), "Exceeded np.int32"
-            gene_footprint_assignment[gene_id] = np.stack(gene_footprint_assignment[gene_id], axis=0).astype(np.int32)
+            assert np.max(gene_footprint_assignment[gene_id]) < max_possible, "Exceeded np.int32"
+            gene_footprint_assignment[gene_id] = gene_footprint_assignment[gene_id].astype(np.int32)
+
+        # There are some genes that are not annotated in any of the chromosomes or in the chromosomes in which there is no footprint.
+        non_covered_genes = positions_gene_map.keys() - gene_footprint_assignment.keys()
+        for gene_id in non_covered_genes:
+            empty_matrix = np.zeros((len(footprint_genome_assignment_list), len(positions_gene_map[gene_id])), dtype=np.int32)
+            assert gene_id not in gene_footprint_assignment, "Error in non_covered_genes"
+            gene_footprint_assignment[gene_id] = empty_matrix
 
         return gene_footprint_assignment
 
@@ -692,7 +711,7 @@ class RiboSeqAssignment:
 class RiboSeqExperiment:
 
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
 
         self.temp_repo_dir = temp_repo_dir
         self.sam_paths_translatome = sam_paths_translatome
@@ -703,25 +722,25 @@ class RiboSeqExperiment:
         self.exclude_genes = exclude_genes
         self.verbose = verbose
         self.recalculate = recalculate
+        self.gene_list = sorted(gene_info_dictionary.keys())
 
         self.translatome = RiboSeqAssignment(self.sam_paths_translatome, self.temp_repo_dir, self.riboseq_assign_at,
-                                             self.riboseq_assign_to, "translatome", protein_genome_instance, gene_info_dictionary)
+                                             self.riboseq_assign_to, name_experiment + "_translatome",
+                                             protein_genome_instance, gene_info_dictionary)
         self.experiment = RiboSeqAssignment(self.sam_paths_experiment, self.temp_repo_dir, self.riboseq_assign_at,
-                                             self.riboseq_assign_to, self.name_experiment, protein_genome_instance, gene_info_dictionary)
+                                            self.riboseq_assign_to, name_experiment + "_experiment",
+                                            protein_genome_instance, gene_info_dictionary)
 
         if exclude_genes:
+            # Bu sayede kaydedilen assignment dosyaları tekrar tekrar kullanılabilir oluyor
             self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
-
-        self.translatome.gene_list = self.translatome.gene_list
-        del self.translatome.exclude_gene_list, self.experiment.exclude_gene_list
-        del self.translatome.gene_list, self.experiment.gene_list
 
     def normalized_rpm_for_positions(self, min_gene_rpm_translatome=0, min_gene_rpkm_translatome=0):
         output = dict()
         translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
         translatome_rpkm_mean = np.mean(self.translatome.calculate_rpkm_genes(), axis=1)
-        for ind, gene_id in enumerate(self.translatome.gene_list):  # gene_info_dictionary.keys()?
+        for ind, gene_id in enumerate(self.gene_list):  # gene_info_dictionary.keys()?
             position_rpm_mean = np.mean(self.experiment.calculate_rpm_positions(gene_id), axis=0)
             gene_rpm_mean = translatome_rpm_mean[ind]
             normalized_rpm = position_rpm_mean / gene_rpm_mean
@@ -734,7 +753,7 @@ class RiboSeqExperiment:
 class RiboSeqSixtymers(RiboSeqExperiment):
 
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, assignment: int,  # name_experiment: str,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, "sixtymers", assignment,
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
 
@@ -761,7 +780,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
 class RiboSeqSelective(RiboSeqExperiment):
 
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=None, verbose=True, recalculate=False):
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
 
@@ -779,8 +798,69 @@ class RiboSeqSelective(RiboSeqExperiment):
 
 
 class RiboSeqCoco(RiboSeqExperiment):
-    pass
 
+    def __init__(self, temp_repo_dir, sam_paths_disome: list, sam_paths_monosome: list, assignment: int,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
+        super().__init__(temp_repo_dir, sam_paths_disome, sam_paths_monosome, "cocoassembly", assignment,
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
+
+        self.binomial_fitting(self.gene_list[500:550])
+
+    def normalized_rpm_for_positions(self, *args, **kwargs):
+        # Overrides parent method
+        raise AssertionError("There is no translatome to calculate this.")
+
+    def binomial_fitting(self, gene_list):
+        self.best_model = dict()
+        for ind, gene_id in enumerate(gene_list):
+            if self.verbose:
+                progress_bar(ind, len(gene_list) - 1)
+            self.best_model[gene_id] = self.binomial_fitting_gene(gene_id)
+
+    def binomial_fitting_gene(self, gene_id):
+        disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
+        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
+        x_data = np.arange(1, len(disome_counts) + 1)
+        fitter_instance = BinomialFitting(x_data, disome_counts, monosome_counts)
+        model_type, parameters = fitter_instance.select_correct_model()
+        return model_type, parameters, len(disome_counts)
+
+    def calculate_curve(self, gene_id):
+        model_type, parameters, x_length = self.best_model[gene_id]
+        x_data = np.arange(1, x_length + 1)
+        if model_type == "base":
+            y_predicted = BinomialFitting.model_base(x_data, *parameters)
+        elif model_type == "ssig":
+            y_predicted = BinomialFitting.model_ssig(x_data, *parameters)
+        elif model_type == "dsig":
+            y_predicted = BinomialFitting.model_dsig(x_data, *parameters)
+        else:
+            raise ValueError("Unknown model in calculate_curve function.")
+        return y_predicted
+
+    def calculate_onset(self,gene_id):
+        model_type, parameters, x_data = self.best_model[gene_id]
+        if model_type == "base":
+            return np.nan
+        elif model_type == "ssig":
+            return parameters[3]  # i_mid
+        elif model_type == "dsig":
+            return parameters[5]  # i_mid
+        else:
+            raise ValueError("Unknown model in calculate_onset function.")
+
+    def plot_result(self, gene_id):
+        disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
+        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
+        x_data = np.arange(1, len(disome_counts) + 1)
+        BinomialFitting(x_data, disome_counts, monosome_counts).plot_result()
+
+
+# TODO: benim fitting aa değil nükleotid alıyor bu sorun olur mu, makalede ne diyor buna dair?
+# TODO: benim coco datası 3-nucleotide periodicity gösteriyor mu
+# TODO: onset'ler korrele mi makaledekiyle?
+
+# TODO: KARAR: infrastructure'da neleri nasıl koyucaz burada
 
 class BinomialFitting:
 
@@ -803,15 +883,20 @@ class BinomialFitting:
     def model_dsig(x, i_init, i_max, i_final, a_1, a_2, i_mid, i_dist):
         return ((i_max - i_init) / (1 + np.exp(-a_1 * (x - i_mid))) + i_init) * ((1 - i_final) / (1 + np.exp(-a_2 * (x - (i_mid + i_dist)))) + i_final)
 
+    # Note: "RuntimeWarning: overflow encountered in exp" will be raised for above two.
+    # For most practical purposes, you can probably approximate 1 / (1 + <a large number>) to zero.
+    # That is to say, just ignore the warning and move on.
+    # Numpy takes care of the approximation for you (when using np.float64).
+
     def neg_log_likelihood_base(self,param):
         y_predicted = self.model_base(self.x_data, *param)
-        log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
-        return log_likelihood
+        negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
+        return negative_log_likelihood
 
     def neg_log_likelihood_ssig(self,param):
         y_predicted = self.model_ssig(self.x_data, *param)
-        log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
-        return log_likelihood
+        negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
+        return negative_log_likelihood
 
     def neg_log_likelihood_dsig(self, param):
         y_predicted = self.model_dsig(self.x_data, *param)
@@ -819,16 +904,16 @@ class BinomialFitting:
         return negative_log_likelihood
 
     def minimize_models(self):
-        settings = {"ftol": 1e-9, 'maxiter': 10000}
+        settings = {"ftol": 1e-7, 'maxiter': 250}  # increase here?
         results_base = minimize(self.neg_log_likelihood_base, method="SLSQP", options=settings,
                                 x0=np.array([0.5]),
                                 bounds=((0,1),))
         results_ssig = minimize(self.neg_log_likelihood_ssig, method="SLSQP", options=settings,
-                                x0=np.array([0.5, 0.5, 0.25, int(len(self.x_data)/2)]),
+                                x0=np.array([0.25, 0.65, 0.25, int(len(self.x_data)/2)]),
                                 # From paper:
                                 bounds=((0, 1), (0, 1), (0, 0.5), (1, len(self.x_data))))
         results_dsig = minimize(self.neg_log_likelihood_dsig, method="SLSQP", options=settings,
-                                x0=np.array([0.5, 0.5, 0.5, 0.25, -0.25, int(len(self.x_data) / 2), int(len(self.x_data) / 2)]),
+                                x0=np.array([0.25, 0.75, 0.5, 0.15, -0.3, int(len(self.x_data) / 2), int(len(self.x_data) / 2)]),
                                 # From paper:
                                 bounds=((0, 1), (0, 1), (0, 1), (0, 0.5), (-0.5, 0), (1, len(self.x_data)), (1, len(self.x_data))))
         return results_base, results_ssig, results_dsig
@@ -847,6 +932,17 @@ class BinomialFitting:
         bic = [self.calculate_BIC(i) for i in minimized_results]
         winner = sorted(zip(bic, ["base", "ssig", "dsig"], minimized_results))[0]
         return winner[1], winner[2].x
+
+    def plot_result(self):
+        base, ssig, dsig = self.minimize_models()
+        plt.plot(self.model_base(self.x_data, *base.x), color='black')
+        plt.plot(self.model_ssig(self.x_data, *ssig.x), color='blue')
+        plt.plot(self.model_dsig(self.x_data, *dsig.x), color='red')
+        plt.scatter(self.x_data, self.disome / (self.disome + self.monosome),alpha=0.25, color='gray')
+        plt.show()
+        print(f"Base ->\nBic:{self.calculate_BIC(base)}\nFun: {base.fun}\n")
+        print(f"Ssig ->\nBic:{self.calculate_BIC(ssig)}\nFun: {ssig.fun}\n")
+        print(f"Dsig ->\nBic:{self.calculate_BIC(dsig)}\nFun: {dsig.fun}\n")
 
     # p = BinomialFitting(np.arange(1,100), np.arange(99), np.ones(99)*100)
 
@@ -1079,21 +1175,6 @@ def download_gtf_refseq(temp_repo_dir, data_url=None):
                         f"gzip -d {gtf_file}"), shell=True)
         assert os.path.isfile(gtf_path) and os.access(gtf_path, os.R_OK)
         return gtf_path  # Return the compressed file
-
-
-# if __name__ == '__main__':
-#     sam_paths_translatome = [
-#         "/Users/kemalinecik/Documents/dropbox/TT1.sam",
-#         "/Users/kemalinecik/Documents/dropbox/TT2.sam",
-#     ]
-#     sam_paths_sixtymers = [
-#         "/Users/kemalinecik/Documents/dropbox/Rep1.sam",
-#         "/Users/kemalinecik/Documents/dropbox/Rep2.sam",
-#         "/Users/kemalinecik/Documents/dropbox/NoPK.sam"
-#     ]
-#     exclude_genes = np.array(["ENSG00000160789"])
-#     temp_repo_dir = "/Users/kemalinecik/Documents/dropbox"
-#     Infrastructre(temp_repo_dir, exclude_genes)
 
 
 # End
