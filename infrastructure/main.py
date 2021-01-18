@@ -15,7 +15,8 @@ import joblib
 import numpy as np
 import pandas as pd
 from scipy import stats
-from scipy.optimize import minimize
+import multiprocessing
+from scipy.optimize import basinhopping
 from statsmodels.stats.proportion import proportion_confint
 import pyensembl
 import math
@@ -49,6 +50,7 @@ class Infrastructre:
         gene_info_names = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_names_db, self.ensembl_release)
         gene_info_uniprot = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_uniprot_db, self.ensembl_release)
 
+        gene_info_database = gene_info_database[gene_info_database["transcript_biotype"] == "protein_coding"]
         self.gene_list = sorted(np.unique(gene_info_database["ensembl_gene_id"].dropna()))
         self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot, verbose=self.verbose)
 
@@ -57,14 +59,18 @@ class Infrastructre:
         transcript_list = np.unique(gene_info_database["ensembl_transcript_id"].dropna())
         self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero, verbose=self.verbose)
 
-        if include_gene3d:
-            self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
-            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero, verbose=self.verbose)
-
         # Integrate RiboSeq data
 
         self.riboseq_assign_to = riboseq_assign_to
         self.riboseq_assign_at = riboseq_assign_at
+
+        # Should be first to calculate, since multiprocessing is quite memory inefficient.
+        if coco:  # [monosome_sam, disome_sam]
+            self.riboseq_coco = RiboSeqCoco(self.temp_repo_dir, coco[0], coco[1], self.riboseq_assign_at,
+                                            self.riboseq_assign_to, self.protein_genome, self.gene_info,
+                                            exclude_genes=self.exclude_genes, verbose=self.verbose)
+        else:
+            self.riboseq_coco = None
 
         if sixtymers:  # [translatome_sam, sixtymer_sam]
             self.riboseq_sixtymers = RiboSeqSixtymers(self.temp_repo_dir, sixtymers[0], sixtymers[1], self.riboseq_assign_at,
@@ -80,12 +86,13 @@ class Infrastructre:
             else:
                 self.riboseq_serb = None
 
-        if coco:  # [monosome_sam, disome_sam]
-            self.riboseq_coco = RiboSeqCoco(self.temp_repo_dir, coco[0], coco[1], self.riboseq_assign_at,
-                                            self.riboseq_assign_to, self.protein_genome, self.gene_info,
-                                            exclude_genes=self.exclude_genes, verbose=self.verbose)
-        else:
-            self.riboseq_coco = None
+        # Integrate protein annotations
+
+        if include_gene3d:
+            self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
+            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero, verbose=self.verbose)
+
+
 
     def create_gene_matrix(self, gene_id):
         pass
@@ -467,7 +474,7 @@ class RiboSeqAssignment:
             loaded_content = self.load_joblib(self.riboseq_group, self.output_file_name, self.verbose)
             consistent_with = all([
                 all([os.path.basename(s) == os.path.basename(l) for s, l in zip(self.sam_paths, loaded_content.sam_paths)]),
-                os.path.basename(self.output_file_name) == os.path.basename(self.output_file_name),
+                os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
                 self.assignment == loaded_content.assignment,
                 len(self.gene_list) == len(loaded_content.gene_list),
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),
@@ -799,23 +806,95 @@ class RiboSeqSelective(RiboSeqExperiment):
 
 class RiboSeqCoco(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_disome: list, sam_paths_monosome: list, assignment: int,
+    def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, assignment: int,
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
-        super().__init__(temp_repo_dir, sam_paths_disome, sam_paths_monosome, "cocoassembly", assignment,
+        super().__init__(temp_repo_dir, sam_paths_monosome, sam_paths_disome, "cocoassembly", assignment,
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
 
-        self.binomial_fitting(self.gene_list[500:550])
+        self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_on_{self.riboseq_assign_to}_fitting_calculations.joblib")
+        self.n_core = multiprocessing.cpu_count()
+
+        try:
+            assert os.access(self.output_file_name_fitting_calc, os.R_OK) and os.path.isfile(self.output_file_name_fitting_calc)
+            if self.recalculate:
+                print(
+                    f"{Col.WARNING}Saved file is found at the path but 'recalculate=True': {self.output_file_name_fitting_calc}{Col.ENDC}.")
+                raise AssertionError
+            loaded_content = self.load_joblib(self.output_file_name_fitting_calc, self.name_experiment, self.verbose)
+            consistent_with = all([
+                all([os.path.basename(s) == os.path.basename(l) for s, l in
+                     zip(sam_paths_disome, loaded_content["sam_paths_disome"])]),
+                all([os.path.basename(s) == os.path.basename(l) for s, l in
+                     zip(sam_paths_monosome, loaded_content["sam_paths_monosome"])]),
+                os.path.basename(self.output_file_name_fitting_calc) == os.path.basename(loaded_content["output_file_name_fitting_calc"]),
+                self.riboseq_assign_at == loaded_content["riboseq_assign_at"],
+                len(self.gene_list) == len(loaded_content["gene_list"]),
+                all([g == l for g, l in zip(self.gene_list, loaded_content["gene_list"])]),
+                # excluded olanlar varsa nolcak
+            ])
+
+            if not consistent_with:
+                print(
+                    f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
+                raise AssertionError
+            self.best_model = loaded_content["best_model"]
+
+        except (AssertionError, AttributeError, FileNotFoundError):
+            print(f"{Col.HEADER}Sigmoid fitting are being calculated: {self.name_experiment}{Col.ENDC}")
+            self.binomial_fitting(self.gene_list, n_core=self.n_core - 2) # todo:CORRECT LINE
+            self.save_joblib()
+
+    def save_joblib(self):
+        # Write down the output dictionary and list as Joblib object for convenience in later uses.
+        if self.verbose:
+            print(f"{Col.HEADER}Calculations is being written to directory: {self.temp_repo_dir}{Col.ENDC}")
+        to_dump = {"sam_paths_disome": self.sam_paths_experiment,
+                   "sam_paths_monosome": self.sam_paths_translatome,
+                   "output_file_name_fitting_calc": self.output_file_name_fitting_calc,
+                   "riboseq_assign_at": self.riboseq_assign_at,
+                   "gene_list": self.gene_list,
+                   "best_model": self.best_model}
+        joblib.dump(to_dump, self.output_file_name_fitting_calc)
+        if self.verbose:
+            print(f"Done: {self.output_file_name_fitting_calc}")
+
+    @staticmethod
+    def load_joblib(output_file_name, name_experiment, verbose):
+        if verbose:
+            print(f"{Col.HEADER}Fitting calculations found for {name_experiment} in path: {output_file_name}{Col.ENDC}")
+        return joblib.load(output_file_name)
 
     def normalized_rpm_for_positions(self, *args, **kwargs):
         # Overrides parent method
         raise AssertionError("There is no translatome to calculate this.")
 
-    def binomial_fitting(self, gene_list):
-        self.best_model = dict()
+    def binomial_fitting(self, gene_list, n_core):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+
+            if len(gene_list) > 3 * n_core:
+                chunk_size = math.ceil(len(gene_list) / n_core)
+            else:
+                chunk_size = len(gene_list)
+
+            gene_list_chunks = [gene_list[i:i + chunk_size] for i in range(0, len(gene_list), chunk_size)]
+
+            executor = multiprocessing.Pool(len(gene_list_chunks))  # when len(gene_list) > 3 * n_core, len(gene_list_chunks) <= n_core
+            result = executor.map(self.binomial_fitting_single_core, gene_list_chunks)
+            executor.close()
+            executor.join()
+
+        result = [j for i in result for j in i]  # Flatten
+        self.best_model = dict(zip(gene_list, result))
+        # Sıralı geliyor mu kontrol et bi
+
+    def binomial_fitting_single_core(self, gene_list):
+        best_model = list()
         for ind, gene_id in enumerate(gene_list):
             if self.verbose:
                 progress_bar(ind, len(gene_list) - 1)
-            self.best_model[gene_id] = self.binomial_fitting_gene(gene_id)
+            best_model.append(self.binomial_fitting_gene(gene_id))
+        return best_model
 
     def binomial_fitting_gene(self, gene_id):
         disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
@@ -853,7 +932,9 @@ class RiboSeqCoco(RiboSeqExperiment):
         disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
         monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
         x_data = np.arange(1, len(disome_counts) + 1)
-        BinomialFitting(x_data, disome_counts, monosome_counts).plot_result()
+        fitter = BinomialFitting(x_data, disome_counts, monosome_counts)
+        fitter.plot_result()
+        return fitter
 
 
 # TODO: benim fitting aa değil nükleotid alıyor bu sorun olur mu, makalede ne diyor buna dair?
@@ -881,42 +962,58 @@ class BinomialFitting:
 
     @staticmethod
     def model_dsig(x, i_init, i_max, i_final, a_1, a_2, i_mid, i_dist):
-        return ((i_max - i_init) / (1 + np.exp(-a_1 * (x - i_mid))) + i_init) * ((1 - i_final) / (1 + np.exp(-a_2 * (x - (i_mid + i_dist)))) + i_final)
+        return ((i_max - i_init) / (1 + np.exp(-a_1 * (x - i_mid))) + i_init) * \
+               ((1 - i_final) / (1 + np.exp(-a_2 * (x - (i_mid + i_dist)))) + i_final)
 
     # Note: "RuntimeWarning: overflow encountered in exp" will be raised for above two.
     # For most practical purposes, you can probably approximate 1 / (1 + <a large number>) to zero.
     # That is to say, just ignore the warning and move on.
     # Numpy takes care of the approximation for you (when using np.float64).
 
+    # RuntimeWarning: invalid value encountered in subtract df = fun(x) - f0
+    # np.nan
+
     def neg_log_likelihood_base(self,param):
+        # The same calculation at model_base(), but for all x_data
         y_predicted = self.model_base(self.x_data, *param)
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
         return negative_log_likelihood
 
     def neg_log_likelihood_ssig(self,param):
+        # The same calculation at model_ssig(), but for all x_data
         y_predicted = self.model_ssig(self.x_data, *param)
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
         return negative_log_likelihood
 
     def neg_log_likelihood_dsig(self, param):
+        # The same calculation at model_dsig(), but for all x_data
         y_predicted = self.model_dsig(self.x_data, *param)
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
         return negative_log_likelihood
 
+    def minimize_base(self, niter=100, seed=1):
+        x0 = np.array([0.5])
+        bounds = ((0,1),)
+        minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
+        return basinhopping(func=self.neg_log_likelihood_base, x0=x0, minimizer_kwargs=minimizer_kwargs,
+                            seed=seed, niter=niter)
+
+    def minimize_ssig(self, niter=100, seed=1):
+        x0 = np.array([0.25, 0.65, 0.25, int(len(self.x_data)/2)])
+        bounds = ((0, 1), (0, 1), (0, 0.5), (1, len(self.x_data)))
+        minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
+        return basinhopping(func=self.neg_log_likelihood_ssig, x0=x0, minimizer_kwargs=minimizer_kwargs,
+                            seed=seed, niter=niter)
+
+    def minimize_dsig(self, niter=100, seed=1):
+        x0 = np.array([0.25, 0.75, 0.5, 0.15, -0.3, int(len(self.x_data) / 2), int(len(self.x_data) / 2)])
+        bounds = ((0, 1), (0, 1), (0, 1), (0, 0.5), (-0.5, 0), (1, len(self.x_data)), (1, len(self.x_data)))
+        minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
+        return basinhopping(func=self.neg_log_likelihood_dsig, x0=x0, minimizer_kwargs=minimizer_kwargs,
+                            seed=seed, niter=niter)
+
     def minimize_models(self):
-        settings = {"ftol": 1e-7, 'maxiter': 250}  # increase here?
-        results_base = minimize(self.neg_log_likelihood_base, method="SLSQP", options=settings,
-                                x0=np.array([0.5]),
-                                bounds=((0,1),))
-        results_ssig = minimize(self.neg_log_likelihood_ssig, method="SLSQP", options=settings,
-                                x0=np.array([0.25, 0.65, 0.25, int(len(self.x_data)/2)]),
-                                # From paper:
-                                bounds=((0, 1), (0, 1), (0, 0.5), (1, len(self.x_data))))
-        results_dsig = minimize(self.neg_log_likelihood_dsig, method="SLSQP", options=settings,
-                                x0=np.array([0.25, 0.75, 0.5, 0.15, -0.3, int(len(self.x_data) / 2), int(len(self.x_data) / 2)]),
-                                # From paper:
-                                bounds=((0, 1), (0, 1), (0, 1), (0, 0.5), (-0.5, 0), (1, len(self.x_data)), (1, len(self.x_data))))
-        return results_base, results_ssig, results_dsig
+        return self.minimize_base(), self.minimize_ssig(), self.minimize_dsig()
 
     def calculate_BIC(self, minimized_result):  # Bayesian Information Criterion
         # BIC = -2 * LL + log(N) * k
@@ -935,7 +1032,7 @@ class BinomialFitting:
 
     def plot_result(self):
         base, ssig, dsig = self.minimize_models()
-        plt.plot(self.model_base(self.x_data, *base.x), color='black')
+        plt.plot(self.model_base(self.x_data, *base.x) + np.zeros(len(self.x_data)), color='black')
         plt.plot(self.model_ssig(self.x_data, *ssig.x), color='blue')
         plt.plot(self.model_dsig(self.x_data, *dsig.x), color='red')
         plt.scatter(self.x_data, self.disome / (self.disome + self.monosome),alpha=0.25, color='gray')

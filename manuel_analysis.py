@@ -2,8 +2,8 @@
 
 """
 
-
 from infrastructure.main import *
+import time
 
 
 temp_repo_dir = "/home/raf_pc/Kemal/Temp"
@@ -30,7 +30,5 @@ I = Infrastructre(temp_repo_dir, exclude_genes=exclude_genes,
                   #serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
                   #sixtymers=[spt, sps],
                   coco=[coco_m, coco_d])
-
-
 
 
