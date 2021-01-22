@@ -25,6 +25,8 @@ from shutil import which
 from Bio.Seq import translate
 from Bio import pairwise2
 import matplotlib.pyplot as plt
+import random
+from typing import Union
 
 
 script_path_infrastructure = __file__
@@ -56,7 +58,7 @@ class Infrastructre:
 
         ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release)
 
-        transcript_list = np.unique(gene_info_database["ensembl_transcript_id"].dropna())
+        transcript_list = sorted(np.unique(gene_info_database["ensembl_transcript_id"].dropna()))
         self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero, verbose=self.verbose)
 
         # Integrate RiboSeq data
@@ -111,98 +113,178 @@ class Infrastructre:
     # get_riboseq, get_domain, get_conservation gibi function'lar yapılacakGE
 
 
-def gene_class_dict_generate(temp_repo_dir, gene_list, gene_info_database, gene_info_names, gene_info_uniprot,
-                             overwrite=False, verbose=True):
+def gene_class_dict_generate(temp_repo_dir, gene_list: list, gene_info_database: pd.DataFrame,
+                             gene_info_names: pd.DataFrame, gene_info_uniprot: pd.DataFrame,
+                             recalculate: bool = False, verbose: bool = True) -> dict:
+    """
+    This function creates a dictionary of Gene class elements.
+    :param temp_repo_dir: Full path directory where temporary files will be stored.
+    :param gene_list: List of gene IDs, for which to create the dictionary. Ideally, it should be sorted.
+    :param gene_info_database: biomart_mapping() output for 'gene_info_database.R' script.
+    :param gene_info_names: biomart_mapping() output for 'gene_info_names.R' script.
+    :param gene_info_uniprot: biomart_mapping() output for 'gene_info_uniprot.R' script.
+    :param recalculate: If True, it will calculate anyway.
+    :param verbose:  If True, it will print to stdout about the process computer currently calculates.
+    :return: Dictionary of gene_id → Gene instance
+    """
 
+    # Get the absolute output file name.
     output_path = os.path.join(temp_repo_dir, "gene_info_database.joblib")
-    if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or overwrite:
-        output = dict()
-        if verbose:
+    # Check if there is already a calculated object saved before.
+    if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or recalculate:
+        # If no file exists, or overwrite is 'True'.
+        output = dict()  # Initiate an dictionary to fill up.
+        if verbose:  # Print out the current process to stdout.
             print(f"{Col.HEADER}Gene information dictionary are being created.{Col.ENDC}")
+        # For each gene in the gene list,
         for ind, gene_id in enumerate(gene_list):
-            progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}")
+            if verbose:  # Print out the current process to stdout as a progress bar.
+                progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}")
+            # Get the information from the pandas_data_frame objects for the gene of interest
             gi = gene_info_database[gene_info_database["ensembl_gene_id"] == gene_id]
             gi_names = gene_info_names[gene_info_names["ensembl_gene_id"] == gene_id]
             gi_uniprot = gene_info_uniprot[gene_info_uniprot["ensembl_gene_id"] == gene_id]
+            # Use the information to create a Gene object using the Gene class.
             output[gene_id] = Gene(gi, gi_names, gi_uniprot)
-        print(f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
+        if verbose:  # Print out the current process to stdout.
+            print(f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
+        # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
         joblib.dump(output, output_path)
-        if verbose:
+        if verbose:  # Print out the current process to stdout.
             print(f"Done: {output_path}")
-        return output
-    else:
-        if verbose:
+        return output  # Return the resulting dictionary.
+    else:  # If the joblib file is found in the temp directory, or overwrite is 'False'.
+        if verbose:  # Print out the current process to stdout.
             print(f"{Col.HEADER}Gene information dictionary is found in path: {output_path}{Col.ENDC}")
-        return joblib.load(output_path)
+        return joblib.load(output_path)  # Load and return the resulting dictionary.
 
 
 class Gene:
+    """
+    Stores all the relevant data for a given gene, prioritizes the transcripts.
+    """
 
-    def __init__(self, one_gene_df, one_gene_names, one_gene_uniprot):
-
-        temp_gene_id = one_gene_df["ensembl_gene_id"].unique()
-        self.gene_id = temp_gene_id[0]
-        self.gene_names = np.unique(np.concatenate((one_gene_names["external_gene_name"].dropna(), one_gene_names["external_synonym"].dropna())))
-        self.uniprot_ids = np.unique(np.concatenate((one_gene_uniprot["uniprotswissprot"].dropna(), one_gene_uniprot["uniprotsptrembl"].dropna())))
-        temp_chromosome = np.unique(np.array(one_gene_df["chromosome_name"], dtype=str))
-        self.chromosome = str(temp_chromosome[0])
-        temp_strand = one_gene_df["strand"].unique()
-        self.strand = "-" if temp_strand[0] == -1 else "+"
-        temp_start = one_gene_df["start_position"].unique()
-        self.start = int(temp_start[0])
-        temp_end = one_gene_df["end_position"].unique()
-        self.end = int(temp_end[0])
+    def __init__(self, one_gene_df: pd.DataFrame, one_gene_names: pd.DataFrame, one_gene_uniprot: pd.DataFrame):
+        """
+        'A=k[k["ensembl_gene_id"] == gene_id]' where k is biomart_mapping() output.
+        See gene_class_dict_generate() for its implementation.
+        :param one_gene_df: 'A', where biomart_mapping was run with gene_info_database.R
+        :param one_gene_names: 'A', where biomart_mapping was run with gene_info_names.R
+        :param one_gene_uniprot: 'A', where biomart_mapping was run with gene_info_uniprot.R
+        """
+        # Below the class variables are first set to a 'temp_x' because in the following assert statement they will
+        # be tested whether there is only one unique value for this for a given gene
+        temp_gene_id = one_gene_df["ensembl_gene_id"].unique()  # Get the gene ID
+        self.gene_id = temp_gene_id[0]  # Assign to gene_id
+        # Get and assign the gene names for the given gene_id. Get external_gene_name and external_synonym as one list.
+        self.gene_names = np.unique(np.concatenate((one_gene_names["external_gene_name"].dropna(),
+                                                    one_gene_names["external_synonym"].dropna())))
+        # Get and assign the uniprot IDs for the given gene_id. Get uniprotswissprot and uniprotsptrembl as one list.
+        self.uniprot_ids = np.unique(np.concatenate((one_gene_uniprot["uniprotswissprot"].dropna(),
+                                                     one_gene_uniprot["uniprotsptrembl"].dropna())))
+        temp_chromosome = np.unique(np.array(one_gene_df["chromosome_name"], dtype=str))  # Get the chromosome name
+        self.chromosome = str(temp_chromosome[0])  # Assign to chromosome
+        temp_strand = one_gene_df["strand"].unique()  # Get the strand
+        self.strand = "-" if temp_strand[0] == -1 else "+"  # Assign to strand
+        temp_start = one_gene_df["start_position"].unique()  # Get start position
+        self.start = int(temp_start[0])  # Assign to end position
+        temp_end = one_gene_df["end_position"].unique()  # Get start position
+        self.end = int(temp_end[0])  # Assign to end position
+        # As mentioned above, these elements should be unique for a given gene.
         assert all([len(i) == 1 for i in [temp_chromosome, temp_strand, temp_start, temp_end]])
+        # Run prioritize transcripts and assign it to 'transcripts' namespace.
         self.transcripts = self.prioritize_transcripts(one_gene_df)
 
-    def prioritize_transcripts(self, gene_df):
-        transcripts = gene_df.drop(["ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand"], axis=1).drop_duplicates()
+    def prioritize_transcripts(self, gene_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        This method aims to prioritize transcripts based on their functional relevance and amount of evidence
+        supporting its presence.
+        :param gene_df: In the same format as one_gene_df, which is described in 'init'.
+        :return: Sorted data frame of transcripts with their scoring by different methods.
+        """
+        # Keep only the relevant information for transcripts.
+        transcripts = gene_df.drop(["ensembl_gene_id", "chromosome_name", "start_position", "end_position", "strand"],
+                                   axis=1).drop_duplicates()
+        # Note these columns comes from gene_info_database.R, so if you chance this 'R' script, change here as well.
+        # As pd.Dataframe.sort_values is used, the sorting is based on alphabetical order. 'By chance', for all others
+        # like mane, gencode, scores can be correctly sorted by just sorting alphabetically. However, for appris
+        # 'P' scores are actually better than 'alt' scores so I just renamed.
         transcripts["transcript_appris"] = transcripts["transcript_appris"].replace(
             ["alternative1", "alternative2"], ["renamed_alternative1", "renamed_alternative2"])
-        # apris'de üçbeş
+        # Check there is only one MANE select for a gene; because if not, the sorting will fail.
         assert len(np.unique(transcripts["transcript_mane_select"].dropna())) <= 1
-        # mane_clinical var mı yok my
-        # basic or not
-        # tsl sıralı zaten
-
+        # Based on my research, sorting the transcripts by the following order will always give the best possible
+        # transcript in terms of functional relevance and amount of evidence supporting its presence.
         transcripts.sort_values(by=["transcript_mane_select", "transcript_appris", "transcript_gencode_basic",
                                     "transcript_tsl", "external_transcript_name"], inplace=True, ignore_index=True)
-        # apris uzun olanı seçiyor zaten
-        return transcripts
+        # See https://m.ensembl.org/info/genome/genebuild/transcript_quality_tags.html for more information
+        return transcripts  # Return the sorted and narrowed dataframe
 
 
 class ProteinGenome:
+    """
+    Store all transcripts sequence as well as corresponding proteins' sequence. This class is created to solve out some
+    problems in the databases that cause my calculations to suffer. For example, for some transcripts that has
+    undefined 3' or 5', the length of protein sequence does not match the length of transcript sequence. The methods in
+    this class solves the problem by adding extra Ns to the transcript sequence. Note that there is no example (in
+    Ensembl version 102) that has a transcript length which is longer than protein length (when multiplied with 3, of
+    course); the issue is in the opposite way. In addition to this, the class convert genomic coordinates to protein or
+    transcript ranges and vice versa.
+    """
 
-    def __init__(self, temp_repo_dir, transcript_list, ensembl_release_object, verbose=True, recalculate=False):
-        self.transcript_list = sorted(transcript_list)
-        self.ensembl_release = ensembl_release_object.annotation_version
-        self.temp_repo_dir = temp_repo_dir
-        self.verbose = verbose
+    def __init__(self, temp_repo_dir: str, transcript_list: list, ensembl_release_object: pyensembl.Genome,
+                 verbose: bool = True, recalculate: bool = False):
+        """
+        :param temp_repo_dir: Full path directory where temporary files will be stored.
+        :param transcript_list: List of gene IDs, for which to create the dictionary. Ideally, it should be sorted.
+        :param ensembl_release_object: Output of ensembl_release_object_creator()
+        :param verbose:  If True, it will print to stdout about the process computer currently calculates.
+        :param recalculate: If True, it will calculate anyway.
+        """
+        self.transcript_list = sorted(transcript_list)  # Sort the transcript list in case it is not sorted and assign
+        self.ensembl_release = ensembl_release_object.annotation_version  # Save the 'annotation_version'
+        self.temp_repo_dir = temp_repo_dir  # Save the 'temp_repo_dir'
+        self.verbose = verbose  # Save the whether 'verbose' activated or not
+        self.recalculate = recalculate  # Save the whether 'recalculate' activated or not.
+        # Get the absolute output file name.
         self.output_file_name = os.path.join(self.temp_repo_dir, "protein_genome_instance.joblib")
-        self.recalculate = recalculate
-
         try:
+            # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
-            if self.recalculate:
-                print(f"{Col.WARNING}Saved file is found at the path but 'recalculate=True': {self.output_file_name}{Col.ENDC}.")
-                raise AssertionError
+            if self.recalculate:  # If 'recalculate' is True,
+                if self.verbose:  # Print below message
+                    print(f"{Col.WARNING}Saved file is found at the path but 'recalculate' is activated: "
+                          f"{self.output_file_name}{Col.ENDC}.")
+                raise AssertionError  # Raise the error to go to the except statement.
+            # Load the saved content from the directory.
             loaded_content = self.load_joblib(self.output_file_name, self.verbose)
-            consistent_with = all([
-                self.transcript_list == loaded_content.transcript_list,
-                self.ensembl_release == loaded_content.ensembl_release,
-                os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
+            # Check the current run is consistent with the saved file
+            consistent_with = all([  # Make sure all below is True
+                self.transcript_list == loaded_content.transcript_list,  # All transcripts are the same, and sorted.
+                self.ensembl_release == loaded_content.ensembl_release,  # The same ensembl release is used.
             ])
-            if not consistent_with:
-                print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
-                raise AssertionError
+            if not consistent_with:  # If there is a problem, the stored does not match with current run.
+                if self.verbose:  # Print below message
+                    print(f"{Col.WARNING}There is at least one inconsistency between input parameters and "
+                          f"loaded content. Recalculating.{Col.ENDC}")
+                raise AssertionError  # Raise the error to go to the except statement.
+            # Otherwise, just accept the database saved in previous run.
             self.db = loaded_content.db
-        except (AssertionError, AttributeError, FileNotFoundError):
-            print(f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
-            self.calculate_transcript_mapping(ensembl_release_object)
+        except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
+            if self.verbose:  # Print below message
+                print(f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
+            self.db = self.calculate_transcript_mapping(ensembl_release_object)  # Calculate to get the mappings
+            # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
             self.save_joblib()
 
-    @staticmethod
-    def consistent_coding_ranges(transcript_object):
+    def consistent_coding_ranges(self, transcript_object: pyensembl.Transcript):
+        """
+        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        :param transcript_object:
+        :return:
+        """
 
         def protein_coding_ranges(transcript_object):
             """
@@ -313,7 +395,7 @@ class ProteinGenome:
                 progress_bar(ind, len(self.transcript_list) - 1)
             transcript_object = ensembl_release_object.transcript_by_id(transcript_id)
             output[transcript_id] = self.consistent_coding_ranges(transcript_object)
-        self.db = output
+        return output
 
     def save_joblib(self):
         # Write down the output dictionary and list as Joblib object for convenience in later uses.
@@ -416,6 +498,7 @@ class EnsemblDomain:
             if self.verbose:
                 progress_bar(ind, len(protein_ids) - 1)
             transcript_id = ensembl_release_object.transcript_id_of_protein_id(protein_id)
+            # orientation doğru mu???
             coordinates_ranges.append(protein_genome_instance.protein2genome(transcript_id, domain_start, domain_end))
             coordinates_contig.append(protein_genome_instance.db[transcript_id][3])
         self.df["genome_chromosome"] = coordinates_contig
@@ -490,7 +573,7 @@ class RiboSeqAssignment:
         except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Gene assignments are being calculated: {self.riboseq_group}{Col.ENDC}")
             self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary)
-            self.gene_lengths = np.array([int(self.gene_assignments[i].shape[1]) for i in self.gene_list], dtype=int)
+            self.gene_lengths = dict(zip(self.gene_list, [int(self.gene_assignments[i].shape[1]) for i in self.gene_list]))
             self.exclude_genes_calculate_stats(self.exclude_gene_list)
             self.save_joblib()
 
@@ -502,24 +585,8 @@ class RiboSeqAssignment:
             self.gene_assignments[gene_id] = empty_matrix
 
         self.exclude_gene_list.extend(exclude_gene_list)
-        self.total_assigned_gene = np.array([np.sum(self.gene_assignments[i], axis=1) for i in self.gene_list], dtype=int)
-        self.total_assigned = int(np.sum(self.total_assigned_gene))
-
-    def get_assigned_read_mapped_read_all(self):
-        mapped_read = 0
-        for sam_path in self.sam_paths:
-            with pysam.AlignmentFile(sam_path, "r") as sam_handle:  # Open SAM file with pysam library
-                mapped_read += sam_handle.count()  # Call count method to find out total read count.
-
-        return self.total_assigned, mapped_read
-
-    def get_assigned_read_mapped_read_individual(self):
-        mapped_read = list()
-        for sam_index in self.sam_paths:
-            with pysam.AlignmentFile(sam_index, "r") as sam_handle:  # Open SAM file with pysam library
-                mapped_read.append(sam_handle.count())  # Call count method to find out total read count.
-        assigned_read = list(np.sum(self.total_assigned_gene, axis=0))
-        return {l: [a, m] for a, m, l in zip(assigned_read, mapped_read, list(self.sam_paths))}
+        self.total_assigned_gene = dict(zip(self.gene_list, [np.nansum(self.gene_assignments[i], axis=1) for i in self.gene_list]))
+        self.total_assigned = np.nansum(np.array(list(self.total_assigned_gene.values())), axis=0)
 
     def calculate_gene_assignments(self, protein_genome_instance, gene_info_dictionary):
 
@@ -696,14 +763,17 @@ class RiboSeqAssignment:
 
         return gene_footprint_assignment
 
-    def calculate_rpm_genes(self):
-        return self.total_assigned_gene / self.total_assigned * 10**6
+    def calculate_rpm_genes(self, gene_id, average=True):
+        replicates = self.total_assigned_gene[gene_id] / self.total_assigned * 1e6
+        return np.mean(replicates) if average else replicates
 
-    def calculate_rpkm_genes(self):
-        return self.total_assigned_gene / self.total_assigned * 10**9 / np.stack([self.gene_lengths] * len(self.sam_paths), axis=1)
+    def calculate_rpkm_genes(self, gene_id, average=True):
+        replicates = self.total_assigned_gene[gene_id] / self.total_assigned * 1e9 / self.gene_lengths[gene_id]
+        return np.mean(replicates) if average else replicates
 
-    def calculate_rpm_positions(self, gene_id):
-        return self.gene_assignments.get(gene_id, np.zeros(self.gene_lengths[np.where(self.gene_list==gene_id)])) / self.total_assigned * 10**6
+    def calculate_rpm_positions(self, gene_id, average=True):
+        replicates = (self.gene_assignments[gene_id].T / self.total_assigned * 1e6).T
+        return np.mean(replicates, axis=0) if average else replicates
 
     def calculate_confidence_interval_DEPRECATED(self, gene_id, value, confidence=0.95):
         assert value in ["lower", "upper", "mean"]
@@ -743,19 +813,14 @@ class RiboSeqExperiment:
             self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
 
-    def normalized_rpm_for_positions(self, min_gene_rpm_translatome=0, min_gene_rpkm_translatome=0):
-        output = dict()
-        translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
-        translatome_rpkm_mean = np.mean(self.translatome.calculate_rpkm_genes(), axis=1)
-        for ind, gene_id in enumerate(self.gene_list):  # gene_info_dictionary.keys()?
-            position_rpm_mean = np.mean(self.experiment.calculate_rpm_positions(gene_id), axis=0)
-            gene_rpm_mean = translatome_rpm_mean[ind]
-            normalized_rpm = position_rpm_mean / gene_rpm_mean
-            if gene_rpm_mean < min_gene_rpm_translatome or translatome_rpkm_mean[ind] < min_gene_rpkm_translatome:
-                output[gene_id] = np.nan
-            else:
-                output[gene_id] = normalized_rpm
-        return output
+    def normalized_rpm_positions(self, gene_id, smoothen=True):
+        positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
+        positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
+        if smoothen:
+            positions_experiment = smooth(positions_experiment, window_len=15, window="hanning")
+            positions_translatome = smooth(positions_translatome, window_len=15, window="hanning")
+        return positions_experiment / positions_translatome
+
 
 class RiboSeqSixtymers(RiboSeqExperiment):
 
@@ -765,23 +830,42 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
 
 
-    def calculate_stalling_peaks_arpat(self):
-        output = dict()
-        translatome_rpm_mean = np.mean(self.translatome.calculate_rpm_genes(), axis=1)
-        for ind, gene_id in enumerate(self.translatome.gene_list):  # gene_info_dictionary.keys()?
-            position_rpm_mean = np.mean(self.experiment.calculate_rpm_positions(gene_id), axis=0)
-            normalized_peak_count = np.sum(position_rpm_mean != 0)
-            gene_rpm_mean = translatome_rpm_mean[ind]
-            if gene_rpm_mean < 5 or normalized_peak_count < 5:  # Arbitrarily 5
-                output[gene_id] = np.nan
-            else:
-                normalized_rpm = position_rpm_mean / gene_rpm_mean
-                output[gene_id] = normalized_rpm.argsort()[-5:][::-1] # Arbitrarily 5
-                # todo: genome position'larını return etsin
-        return output
+    def stalling_peaks_arpat(self, gene_id, mmc_threshold=0, normalized_peak_count_thr=0, get_top= 5):
+        # Arbitrarily 5 for all from the Arpat paper.
+        land = self.experiment.calculate_rpm_positions(gene_id, average=True)  # library size normalized disome peaks
+        normalized_peak_count = np.sum(land)  # to test whether normalized peak count > 5
+        mmc = np.mean(self.translatome.gene_assignments[gene_id])  # mean monosome count
+        if mmc < mmc_threshold or normalized_peak_count < normalized_peak_count_thr:
+            return np.nan
+        else:
+            normalized_rpm = land / mmc
+            return normalized_rpm, normalized_rpm.argsort()[-get_top:][::-1] # Arbitrarily 5
 
-    def calculate_stalling_peaks_inecik(self):
-        pass  # todo
+    def stalling_peaks_inecik_1(self):
+        pass
+
+
+    def see_examples(self, method, *args, **kwargs):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            x, y = 3, 3
+            fig, axes = plt.subplots(x, y, figsize=(x*2, y*2), gridspec_kw={'hspace': 0, 'wspace': 0})
+            for i1 in range(axes.shape[0]):
+                for i2 in range(axes.shape[1]):
+                    gene_id = random.choice(self.gene_list)
+                    if method == "arpat":
+                        arr, peaks = self.stalling_peaks_arpat(gene_id, *args, **kwargs)
+                    elif method == "inecik":
+                        pass
+                    total_exp = self.experiment.total_assigned[gene_id]
+                    total_tra = self.translatome.total_assigned[gene_id]
+                    axes[i1][i2].plot(arr, alpha=0.75, color='gray')
+                    axes[i1][i2].scatter(peaks, [arr[p] for p in peaks], color="blue", alpha=1, s=20)
+                    axes[i1][i2].axes.get_xaxis().set_visible(False)
+                    axes[i1][i2].axes.get_yaxis().set_visible(False)
+                    axes[i1][i2].text(0, 0, f"{gene_id}::    {total_exp} - {total_tra}", fontsize=6, transform=axes[i1][i2].transAxes)
+            plt.tight_layout()
+            plt.show()
 
 
 class RiboSeqSelective(RiboSeqExperiment):
@@ -792,16 +876,7 @@ class RiboSeqSelective(RiboSeqExperiment):
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
 
     def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
-        normalized_rpm = self.normalized_rpm_for_positions(min_gene_rpm_translatome, min_gene_rpkm_translatome)
-        output = dict()
-        for ind, gene_id in enumerate(normalized_rpm.keys()):
-            gene_normalized_rpm = output[gene_id]
-            if np.isnan(gene_normalized_rpm):
-                output[gene_id] = np.nan
-            else:
-                output[gene_id] = np.where(normalized_rpm[gene_id] > normalized_rpm_threshold)
-            # todo: genome position'larını return etsin
-        return output
+        pass
 
 
 class RiboSeqCoco(RiboSeqExperiment):
@@ -841,7 +916,7 @@ class RiboSeqCoco(RiboSeqExperiment):
 
         except (AssertionError, AttributeError, FileNotFoundError):
             print(f"{Col.HEADER}Sigmoid fitting are being calculated: {self.name_experiment}{Col.ENDC}")
-            self.binomial_fitting(self.gene_list, n_core=self.n_core - 2) # todo:CORRECT LINE
+            self.best_model = self.binomial_fitting(self.gene_list, n_core=self.n_core - 2)
             self.save_joblib()
 
     def save_joblib(self):
@@ -864,29 +939,24 @@ class RiboSeqCoco(RiboSeqExperiment):
             print(f"{Col.HEADER}Fitting calculations found for {name_experiment} in path: {output_file_name}{Col.ENDC}")
         return joblib.load(output_file_name)
 
-    def normalized_rpm_for_positions(self, *args, **kwargs):
+    def normalized_rpm_positions(self, *args, **kwargs):
         # Overrides parent method
         raise AssertionError("There is no translatome to calculate this.")
 
     def binomial_fitting(self, gene_list, n_core):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-
             if len(gene_list) > 3 * n_core:
                 chunk_size = math.ceil(len(gene_list) / n_core)
             else:
                 chunk_size = len(gene_list)
-
             gene_list_chunks = [gene_list[i:i + chunk_size] for i in range(0, len(gene_list), chunk_size)]
-
             executor = multiprocessing.Pool(len(gene_list_chunks))  # when len(gene_list) > 3 * n_core, len(gene_list_chunks) <= n_core
             result = executor.map(self.binomial_fitting_single_core, gene_list_chunks)
             executor.close()
             executor.join()
-
         result = [j for i in result for j in i]  # Flatten
-        self.best_model = dict(zip(gene_list, result))
-        # Sıralı geliyor mu kontrol et bi
+        return dict(zip(gene_list, result))
 
     def binomial_fitting_single_core(self, gene_list):
         best_model = list()
@@ -896,51 +966,110 @@ class RiboSeqCoco(RiboSeqExperiment):
             best_model.append(self.binomial_fitting_gene(gene_id))
         return best_model
 
+    def create_BF(self, gene_id):  # BF = binomial fitting instance
+        # below lines are identical to plot results
+        disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
+        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
+        x_data = np.arange(1, len(disome_counts) + 1)
+        return BinomialFitting(x_data, disome_counts, monosome_counts)
+
     def binomial_fitting_gene(self, gene_id):
-        disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
-        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
-        x_data = np.arange(1, len(disome_counts) + 1)
-        fitter_instance = BinomialFitting(x_data, disome_counts, monosome_counts)
-        model_type, parameters = fitter_instance.select_correct_model()
-        return model_type, parameters, len(disome_counts)
+        fitter_instance = self.create_BF(gene_id)
+        winner_model, model_names, bic_scores, raw_fitting = fitter_instance.select_correct_model()
+        return {"winner_model": winner_model,
+                "gene_length": self.experiment.gene_assignments[gene_id].shape[1],
+                "bic_scores": dict(zip(model_names, bic_scores)),
+                "raw_fitting": dict(zip(model_names, raw_fitting))}
 
-    def calculate_curve(self, gene_id):
-        model_type, parameters, x_length = self.best_model[gene_id]
-        x_data = np.arange(1, x_length + 1)
-        if model_type == "base":
-            y_predicted = BinomialFitting.model_base(x_data, *parameters)
-        elif model_type == "ssig":
-            y_predicted = BinomialFitting.model_ssig(x_data, *parameters)
-        elif model_type == "dsig":
-            y_predicted = BinomialFitting.model_dsig(x_data, *parameters)
-        else:
-            raise ValueError("Unknown model in calculate_curve function.")
-        return y_predicted
+    def calculate_curve(self, gene_id, model_name=None):
+        results = self.best_model[gene_id]
+        if not model_name:
+            model_name = results["winner_model"]
+        x_data = np.arange(1, results["gene_length"] + 1)
+        if model_name == "base":
+            return BinomialFitting.model_base(x_data, *results["raw_fitting"]["base"].x)
+        elif model_name == "ssig":
+            return BinomialFitting.model_ssig(x_data, *results["raw_fitting"]["ssig"].x)
+        elif model_name == "dsig":
+            return BinomialFitting.model_dsig(x_data, *results["raw_fitting"]["dsig"].x)
 
-    def calculate_onset(self,gene_id):
-        model_type, parameters, x_data = self.best_model[gene_id]
-        if model_type == "base":
+    def calculate_onset(self,gene_id, model_name=None):
+
+        def helper(p_ind, p_i, p_j, p_y_mid):
+            return p_ind if abs(p_i - p_y_mid) < abs(p_j - p_y_mid) else p_ind + 1
+
+        def find_onset(the_arr, arr_max):
+            if len(the_arr) == 0:
+                return np.nan
+            arr_stride = np.lib.stride_tricks.as_strided(the_arr, shape=(len(the_arr), 2), strides=(the_arr.strides + the_arr.strides))
+            # last element is just bullshit
+            y_mid = (arr_max + the_arr[0]) / 2
+            x_mid = list(set([helper(ind, i, j, y_mid) for ind, (i, j) in enumerate(arr_stride[:-1]) if i <= y_mid <= j]))
+            assert len(x_mid) != 0, f"Type 0 error in find_onset: {gene_id}"
+            assert len(x_mid) == 1, f"Type 1 error in find_onset: {gene_id}"
+            return x_mid[0]
+
+        def find_max(the_arr):
+            the_arr = list(the_arr)
+            while the_arr:
+                max_point = max(the_arr)
+                last_point = the_arr.pop(-1)
+                if max_point != last_point:
+                    return the_arr.index(max_point)
+            return 0
+
+        results = self.best_model[gene_id]
+        if not model_name:
+            model_name = results["winner_model"]
+
+        if model_name == "base":
             return np.nan
-        elif model_type == "ssig":
-            return parameters[3]  # i_mid
-        elif model_type == "dsig":
-            return parameters[5]  # i_mid
         else:
-            raise ValueError("Unknown model in calculate_onset function.")
+            arr = self.calculate_curve(gene_id, model_name=model_name)
+            marr = smooth(np.round(arr, 2), window_len=15, window="hanning")  # smooth and round
+            # todo: fonksiyon yerine açık açık yaz
+            derivative = np.gradient(marr)
+            descending = np.sum(derivative < 0)
+            ascending = np.sum(derivative > 0)
+            if model_name == "ssig" and descending != 0:  # negative sigmoid!, only descents
+                assert ascending == 0
+                return np.nan
+            elif model_name == "ssig":
+                max_value = arr.max()
+                return find_onset(arr, max_value)
+            elif model_name == "dsig" and descending != 0 and ascending == 0: # negative sigmoid!, only descents
+                return np.nan
+            elif model_name == "dsig" and descending == 0 and ascending != 0:
+                max_value = arr.max()
+                return find_onset(arr, max_value)
+            elif model_name == "dsig":
+                max_value_index = find_max(marr)
+                sub_arr = arr[:max_value_index]
+                max_value = arr[max_value_index]
+                return find_onset(sub_arr, max_value)
+            else:
+                raise AssertionError("Unexpected error!")
 
-    def plot_result(self, gene_id):
-        disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
-        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
-        x_data = np.arange(1, len(disome_counts) + 1)
-        fitter = BinomialFitting(x_data, disome_counts, monosome_counts)
-        fitter.plot_result()
-        return fitter
+    def plot_result(self, gene_id, also_print=True, model_name=None):
+        results = self.best_model[gene_id]
+        if not model_name:
+            model_name = results["winner_model"]
+        # below lines are identical to createBD
+        f = self.create_BF(gene_id)
+        onset = self.calculate_onset(gene_id, model_name=model_name)
+        plt.plot(self.calculate_curve(gene_id, model_name="base"), color='black')
+        plt.plot(self.calculate_curve(gene_id, model_name="ssig"), color='blue')
+        plt.plot(self.calculate_curve(gene_id, model_name="dsig"), color='red')
+        plt.vlines(onset, 0, 1, color="blue", alpha=0.75)
+        plt.scatter(f.x_data, f.disome / (f.disome + f.monosome), alpha=0.25, color='gray')
+        plt.show()
+        if also_print:
+            print(f"base::\nBic: {results['bic_scores']['base']}\nFun: {results['raw_fitting']['base'].fun}\n")
+            print(f"ssig::\nBic: {results['bic_scores']['ssig']}\nFun: {results['raw_fitting']['ssig'].fun}\n")
+            print(f"dsig::\nBic: {results['bic_scores']['dsig']}\nFun: {results['raw_fitting']['dsig'].fun}\n")
+            print(f"Winner: {model_name}\nOnset: {onset}")
 
-
-# TODO: benim fitting aa değil nükleotid alıyor bu sorun olur mu, makalede ne diyor buna dair?
 # TODO: benim coco datası 3-nucleotide periodicity gösteriyor mu
-# TODO: onset'ler korrele mi makaledekiyle?
-
 # TODO: KARAR: infrastructure'da neleri nasıl koyucaz burada
 
 class BinomialFitting:
@@ -954,7 +1083,7 @@ class BinomialFitting:
 
     @staticmethod
     def model_base(x, p):
-        return p
+        return p + np.zeros(len(x))
 
     @staticmethod
     def model_ssig(x, i_init, i_max, a, i_mid):
@@ -991,29 +1120,26 @@ class BinomialFitting:
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
         return negative_log_likelihood
 
-    def minimize_base(self, niter=100, seed=1):
+    def minimize_base(self, seed=1):
         x0 = np.array([0.5])
         bounds = ((0,1),)
         minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
         return basinhopping(func=self.neg_log_likelihood_base, x0=x0, minimizer_kwargs=minimizer_kwargs,
-                            seed=seed, niter=niter)
+                            seed=seed, niter=150, stepsize=1, interval=50, T=10000)
 
-    def minimize_ssig(self, niter=100, seed=1):
+    def minimize_ssig(self, seed=1):
         x0 = np.array([0.25, 0.65, 0.25, int(len(self.x_data)/2)])
         bounds = ((0, 1), (0, 1), (0, 0.5), (1, len(self.x_data)))
         minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
         return basinhopping(func=self.neg_log_likelihood_ssig, x0=x0, minimizer_kwargs=minimizer_kwargs,
-                            seed=seed, niter=niter)
+                            seed=seed, niter=900, stepsize=1, interval=10, T=10000)
 
-    def minimize_dsig(self, niter=100, seed=1):
+    def minimize_dsig(self, seed=1):
         x0 = np.array([0.25, 0.75, 0.5, 0.15, -0.3, int(len(self.x_data) / 2), int(len(self.x_data) / 2)])
         bounds = ((0, 1), (0, 1), (0, 1), (0, 0.5), (-0.5, 0), (1, len(self.x_data)), (1, len(self.x_data)))
         minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
         return basinhopping(func=self.neg_log_likelihood_dsig, x0=x0, minimizer_kwargs=minimizer_kwargs,
-                            seed=seed, niter=niter)
-
-    def minimize_models(self):
-        return self.minimize_base(), self.minimize_ssig(), self.minimize_dsig()
+                            seed=seed, niter=900, stepsize=1, interval=10, T=10000)
 
     def calculate_BIC(self, minimized_result):  # Bayesian Information Criterion
         # BIC = -2 * LL + log(N) * k
@@ -1024,22 +1150,12 @@ class BinomialFitting:
         N = len(self.x_data)
         return -2 * LL + np.log(N) * k
 
-    def select_correct_model(self):
-        minimized_results = self.minimize_models()
+    def select_correct_model(self, seed=1):
+        models = ["base", "ssig", "dsig"]
+        minimized_results = (self.minimize_base(seed), self.minimize_ssig(seed), self.minimize_dsig(seed))
         bic = [self.calculate_BIC(i) for i in minimized_results]
-        winner = sorted(zip(bic, ["base", "ssig", "dsig"], minimized_results))[0]
-        return winner[1], winner[2].x
-
-    def plot_result(self):
-        base, ssig, dsig = self.minimize_models()
-        plt.plot(self.model_base(self.x_data, *base.x) + np.zeros(len(self.x_data)), color='black')
-        plt.plot(self.model_ssig(self.x_data, *ssig.x), color='blue')
-        plt.plot(self.model_dsig(self.x_data, *dsig.x), color='red')
-        plt.scatter(self.x_data, self.disome / (self.disome + self.monosome),alpha=0.25, color='gray')
-        plt.show()
-        print(f"Base ->\nBic:{self.calculate_BIC(base)}\nFun: {base.fun}\n")
-        print(f"Ssig ->\nBic:{self.calculate_BIC(ssig)}\nFun: {ssig.fun}\n")
-        print(f"Dsig ->\nBic:{self.calculate_BIC(dsig)}\nFun: {dsig.fun}\n")
+        winner = sorted(zip(bic, models))[0]
+        return winner[1], models, bic, minimized_results
 
     # p = BinomialFitting(np.arange(1,100), np.arange(99), np.ones(99)*100)
 
@@ -1126,6 +1242,7 @@ def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make
     cds_all_ranges = [protein_genome_instance.db[transcript_id][0] for transcript_id in transcript_list]
     cds_all_ranges = reduce_range_list([j for i in cds_all_ranges for j in i])  # it sorts
     strand = -1 if protein_genome_instance.db[transcript_list[0]][4] == "-" else 1  # all tx are the same
+    # Ters olanları ters sırada veriyor!!!
     if strand == -1:
         cds_all_ranges = [[j, i] for i, j in reversed(cds_all_ranges)]  # reverse if at '-'
     if not make_array:
@@ -1137,6 +1254,7 @@ def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make
 def best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=False):
     best_transcript = gene_info_dictionary[gene_id].transcripts.iloc[0][0]  # At least 1 transcript exists
     cds_ranges = protein_genome_instance.db[best_transcript][0]
+    # Ters olanları ters sırada veriyor!!!
     if not make_array:
         return cds_ranges
     else:
@@ -1206,6 +1324,61 @@ def progress_bar(iteration, total, prefix='Progress:', suffix='', decimals=1, ba
         sys.stdout.flush()
 
 
+def smooth(x, window_len=15, window='hanning'):
+    '''
+    Smooth the data using a window with requested size.
+    Adapted from:
+    http://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
+
+    This method is based on the convolution of a scaled window with the signal.
+    The signal is prepared by introducing reflected copies of the signal
+    (with the window size) in both ends so that transient parts are minimized
+    in the begining and end part of the output signal.
+    input:
+        x: the input signal
+        window_len: the dimension of the smoothing window; should be an odd integer
+        window: the type of window from 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'
+            flat window will produce a moving average smoothing.
+    output:
+        the smoothed signal
+
+    example:
+    t=linspace(-2,2,0.1)
+    x=sin(t)+randn(len(t))*0.1
+    y=smooth(x)
+    see also:
+    numpy.hanning, numpy.hamming, numpy.bartlett, numpy.blackman, numpy.convolve
+    scipy.signal.lfilter
+    TODO: the window parameter could be the window itself if an array instead of a string
+    NOTE: length(output) != length(input), to correct this:
+    return y[(window_len/2-1):-(window_len/2)] instead of just y.
+    '''
+
+    if window_len < 3:  return x
+
+    if x.ndim != 1: raise (Exception('smooth only accepts 1 dimension arrays.'))
+    if x.size < window_len:  raise (Exception('Input vector needs to be bigger than window size.'))
+    win_type = ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']
+    if window not in win_type: raise (Exception('Window type is unknown'))
+
+    s = np.r_[x[window_len - 1:0:-1], x, x[-2:-window_len - 1:-1]]
+    # print(len(s))
+    if window == 'flat':  # moving average
+        w = np.ones(window_len, 'd')
+    else:
+        w = eval('np.' + window + '(window_len)')
+
+    y = np.convolve(w / w.sum(), s, mode='valid')
+
+    # saesha modify
+    ds = y.shape[0] - x.shape[0]  # difference of shape
+    dsb = ds // 2  # [almsot] half of the difference of shape for indexing at the begining
+    dse = ds - dsb  # rest of the difference of shape for indexing at the end
+    y = y[dsb:-dse]
+
+    return y
+
+
 class Col:
     HEADER = '\033[95m\033[1m'
     OKBLUE = '\033[94m'
@@ -1254,7 +1427,7 @@ def gtf_cds_parser(gtf_path, verbose=False):
 def download_gtf_refseq(temp_repo_dir, data_url=None):
     """
     Function is to download or find the file in temp_repo_dir.
-    :param temp_repo_dir: String. Directory to download or find the file
+    :param temp_repo_dir: Directory to download or find the file
     :return: String. Path of gtf or gtf.gz
     """
     if not data_url:

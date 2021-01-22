@@ -6,11 +6,11 @@ output_path = args[2]
 
 load(r_data_path)
 
-# base1=sigmoidfits[["HEK"]][["1"]][["base"]][["transcript"]]
+base1=sigmoidfits[["HEK"]][["1"]][["base"]][["transcript"]]
 ssig1=sigmoidfits[["HEK"]][["1"]][["ssig"]][["transcript"]]
 dsig1=sigmoidfits[["HEK"]][["1"]][["dsig"]][["transcript"]]
 
-# base2=sigmoidfits[["HEK"]][["2"]][["base"]][["transcript"]]
+base2=sigmoidfits[["HEK"]][["2"]][["base"]][["transcript"]]
 ssig2=sigmoidfits[["HEK"]][["2"]][["ssig"]][["transcript"]]
 dsig2=sigmoidfits[["HEK"]][["2"]][["dsig"]][["transcript"]]
 

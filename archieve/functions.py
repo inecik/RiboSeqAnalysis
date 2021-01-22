@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def smooth(x, window_len=11, window='hanning'):
+def smooth(x, window_len=15, window='hanning'):
     '''
     Smooth the data using a window with requested size.
     Adapted from:
