@@ -2,7 +2,7 @@
 
 """
 
-#from infrastructure.main import *
+from infrastructure.main import *
 import time
 
 
@@ -26,9 +26,8 @@ coco_m = [os.path.join(data_repo_dir, "Coco", i) for i in ["Mono1.sam", "Mono2.s
 exclude_genes = ["ENSG00000160789"]
 
 I = Infrastructre(temp_repo_dir, exclude_genes=exclude_genes,
-                  #include_gene3d=True,
-                  #serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
-                  sixtymers=[spt, sps])
-                  #coco=[coco_m, coco_d])
-I.riboseq_sixtymers.see_examples("arpat")
+                  include_gene3d=True,
+                  serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
+                  sixtymers=[spt, sps],
+                  coco=[coco_m, coco_d])
 

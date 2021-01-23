@@ -10,6 +10,7 @@ import subprocess
 import sys
 import warnings
 import itertools
+import logging
 
 import joblib
 import numpy as np
@@ -17,7 +18,7 @@ import pandas as pd
 from scipy import stats
 import multiprocessing
 from scipy.optimize import basinhopping
-from statsmodels.stats.proportion import proportion_confint
+# from statsmodels.stats.proportion import proportion_confint
 import pyensembl
 import math
 import pysam
@@ -26,7 +27,6 @@ from Bio.Seq import translate
 from Bio import pairwise2
 import matplotlib.pyplot as plt
 import random
-from typing import Union
 
 
 script_path_infrastructure = __file__
@@ -134,28 +134,24 @@ def gene_class_dict_generate(temp_repo_dir, gene_list: list, gene_info_database:
     if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or recalculate:
         # If no file exists, or overwrite is 'True'.
         output = dict()  # Initiate an dictionary to fill up.
-        if verbose:  # Print out the current process to stdout.
-            print(f"{Col.HEADER}Gene information dictionary are being created.{Col.ENDC}")
+        print_verbose(verbose, f"{Col.HEADER}Gene information dictionary are being created.{Col.ENDC}")
         # For each gene in the gene list,
         for ind, gene_id in enumerate(gene_list):
-            if verbose:  # Print out the current process to stdout as a progress bar.
-                progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}")
+            # Print out the current process to stdout as a progress bar.
+            progress_bar(ind, len(gene_list) - 1, suffix=f"    {gene_id}", verbose=verbose)
             # Get the information from the pandas_data_frame objects for the gene of interest
             gi = gene_info_database[gene_info_database["ensembl_gene_id"] == gene_id]
             gi_names = gene_info_names[gene_info_names["ensembl_gene_id"] == gene_id]
             gi_uniprot = gene_info_uniprot[gene_info_uniprot["ensembl_gene_id"] == gene_id]
             # Use the information to create a Gene object using the Gene class.
             output[gene_id] = Gene(gi, gi_names, gi_uniprot)
-        if verbose:  # Print out the current process to stdout.
-            print(f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
+        print_verbose(verbose, f"{Col.HEADER}Results are being written to directory: {temp_repo_dir}{Col.ENDC}")
         # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
         joblib.dump(output, output_path)
-        if verbose:  # Print out the current process to stdout.
-            print(f"Done: {output_path}")
+        print_verbose(verbose, f"Done: {output_path}")
         return output  # Return the resulting dictionary.
     else:  # If the joblib file is found in the temp directory, or overwrite is 'False'.
-        if verbose:  # Print out the current process to stdout.
-            print(f"{Col.HEADER}Gene information dictionary is found in path: {output_path}{Col.ENDC}")
+        print_verbose(verbose, f"{Col.HEADER}Gene information dictionary is found in path: {output_path}{Col.ENDC}")
         return joblib.load(output_path)  # Load and return the resulting dictionary.
 
 
@@ -195,7 +191,8 @@ class Gene:
         # Run prioritize transcripts and assign it to 'transcripts' namespace.
         self.transcripts = self.prioritize_transcripts(one_gene_df)
 
-    def prioritize_transcripts(self, gene_df: pd.DataFrame) -> pd.DataFrame:
+    @ staticmethod
+    def prioritize_transcripts(gene_df: pd.DataFrame) -> pd.DataFrame:
         """
         This method aims to prioritize transcripts based on their functional relevance and amount of evidence
         supporting its presence.
@@ -252,9 +249,8 @@ class ProteinGenome:
             # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
             if self.recalculate:  # If 'recalculate' is True,
-                if self.verbose:  # Print below message
-                    print(f"{Col.WARNING}Saved file is found at the path but 'recalculate' is activated: "
-                          f"{self.output_file_name}{Col.ENDC}.")
+                print_verbose(verbose, f"{Col.WARNING}Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}{Col.ENDC}.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Load the saved content from the directory.
             loaded_content = self.load_joblib(self.output_file_name, self.verbose)
@@ -264,20 +260,19 @@ class ProteinGenome:
                 self.ensembl_release == loaded_content.ensembl_release,  # The same ensembl release is used.
             ])
             if not consistent_with:  # If there is a problem, the stored does not match with current run.
-                if self.verbose:  # Print below message
-                    print(f"{Col.WARNING}There is at least one inconsistency between input parameters and "
-                          f"loaded content. Recalculating.{Col.ENDC}")
+                print_verbose(verbose, f"{Col.WARNING}There is at least one inconsistency between input parameters and "
+                                       f"loaded content. Recalculating.{Col.ENDC}")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Otherwise, just accept the database saved in previous run.
             self.db = loaded_content.db
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
-            if self.verbose:  # Print below message
-                print(f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
+            print_verbose(verbose, f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
             self.db = self.calculate_transcript_mapping(ensembl_release_object)  # Calculate to get the mappings
             # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
             self.save_joblib()
 
-    def consistent_coding_ranges(self, transcript_object: pyensembl.Transcript):
+    @staticmethod
+    def consistent_coding_ranges(transcript_object: pyensembl.Transcript):
         """
         00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
         00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
@@ -344,7 +339,7 @@ class ProteinGenome:
 
         try:
             coding_position_ranges = [list(i) for i in transcript_object.coding_sequence_position_ranges]
-        except ValueError: # ValueError: Transcript does not contain feature CDS
+        except ValueError:  # ValueError: Transcript does not contain feature CDS
             return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in transcript_object.exon_intervals], \
                    None, transcript_object.sequence, transcript_object.contig, transcript_object.strand
 
@@ -379,7 +374,7 @@ class ProteinGenome:
                 coding_position_ranges[-1][0] -= modify3
 
             query_transcript = query_transcript[-mofify5:] if mofify5 >= 0 else "N" * -mofify5 + query_transcript
-            query_transcript = query_transcript + "N" * modify3 if modify3 >=0 else query_transcript[:modify3]
+            query_transcript = query_transcript + "N" * modify3 if modify3 >= 0 else query_transcript[:modify3]
 
             assert ensembl_range_sum(coding_position_ranges) == len(transcript_object.protein_sequence) * 3
             assert len(query_transcript) == len(transcript_object.protein_sequence) * 3
@@ -430,7 +425,7 @@ class ProteinGenome:
 
         introns = list(itertools.accumulate(introns))
         output_relative_introns = list()
-        for ind , (cdr_start, cdr_end) in enumerate(cdr_relative):
+        for ind, (cdr_start, cdr_end) in enumerate(cdr_relative):
             if start_nt > cdr_end:
                 continue
             elif cdr_start <= start_nt <= cdr_end and cdr_start <= end_nt <= cdr_end:
@@ -536,7 +531,7 @@ class EnsemblDomain:
 class RiboSeqAssignment:
 
     def __init__(self, sam_paths: list, temp_repo_dir: str, assignment: int, selection: str, riboseq_group: str,
-                 protein_genome_instance:ProteinGenome, gene_info_dictionary:dict, verbose=True, recalculate=False):
+                 protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, verbose=True, recalculate=False):
         # :param riboseq_group: String to identify the RiboSeq experiment annotation; like "translatome" or "60mers"
         self.sam_paths = sorted(sam_paths)
         self.temp_repo_dir = temp_repo_dir
@@ -577,7 +572,7 @@ class RiboSeqAssignment:
             self.exclude_genes_calculate_stats(self.exclude_gene_list)
             self.save_joblib()
 
-    def exclude_genes_calculate_stats(self, exclude_gene_list:list):
+    def exclude_genes_calculate_stats(self, exclude_gene_list: list):
         for gene_id in exclude_gene_list:
             target_shape = self.gene_assignments[gene_id].shape
             empty_matrix = np.empty(target_shape)
@@ -687,6 +682,7 @@ class RiboSeqAssignment:
 
                 try:
                     assigned_nucleotide = reference_positions[assignment]
+                    # TODO: PERIODICTY GÖSTERMIYOR!
                 except IndexError:  # if list index out of range
                     counter += 1
                     continue
@@ -744,7 +740,7 @@ class RiboSeqAssignment:
 
                     # Create an empty matrix to fill with raw counts, which originate from different replicates
                     if gene_id not in gene_footprint_assignment:
-                        gene_footprint_assignment[gene_id] = np.zeros((len(footprint_genome_assignment_list),len(temp_assignments)),)
+                        gene_footprint_assignment[gene_id] = np.zeros((len(footprint_genome_assignment_list), len(temp_assignments)),)
                     # Make sure the line is not filled previously
                     assert np.max(gene_footprint_assignment[gene_id][ind_assignment]) == 0, "Error in footprint_counts_to_genes: Multiple genes"
                     gene_footprint_assignment[gene_id][ind_assignment] = temp_assignments
@@ -784,6 +780,7 @@ class RiboSeqAssignment:
         std_n_sqrt_conf = (np.std(rpm, axis=0) / np.sqrt(rpm.shape[0])) * confidence
         return mean - std_n_sqrt_conf if value == "lower" else mean + std_n_sqrt_conf
 
+# todo: warnings.simplefilter('ignore', np.RankWarning)
 
 class RiboSeqExperiment:
 
@@ -817,8 +814,8 @@ class RiboSeqExperiment:
         positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
         positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
         if smoothen:
-            positions_experiment = smooth(positions_experiment, window_len=15, window="hanning")
-            positions_translatome = smooth(positions_translatome, window_len=15, window="hanning")
+            positions_experiment = smooth_array(positions_experiment, window_len=15, window="hanning")
+            positions_translatome = smooth_array(positions_translatome, window_len=15, window="hanning")
         return positions_experiment / positions_translatome
 
 
@@ -827,8 +824,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, assignment: int,  # name_experiment: str,
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, "sixtymers", assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
-
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
     def stalling_peaks_arpat(self, gene_id, mmc_threshold=0, normalized_peak_count_thr=0, get_top= 5):
         # Arbitrarily 5 for all from the Arpat paper.
@@ -839,33 +835,32 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return np.nan
         else:
             normalized_rpm = land / mmc
-            return normalized_rpm, normalized_rpm.argsort()[-get_top:][::-1] # Arbitrarily 5
+            return normalized_rpm, normalized_rpm.argsort()[-get_top:][::-1]  # Arbitrarily 5
 
     def stalling_peaks_inecik_1(self):
         pass
 
-
-    def see_examples(self, method, *args, **kwargs):
+    def see_examples(self, function, *args, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            x, y = 3, 3
-            fig, axes = plt.subplots(x, y, figsize=(x*2, y*2), gridspec_kw={'hspace': 0, 'wspace': 0})
+            x, y = 3, 2
+            fig, axes = plt.subplots(x, y, figsize=(y * 5, x), gridspec_kw={'hspace': 0, 'wspace': 0})
+            random_gene_list = list()
             for i1 in range(axes.shape[0]):
                 for i2 in range(axes.shape[1]):
                     gene_id = random.choice(self.gene_list)
-                    if method == "arpat":
-                        arr, peaks = self.stalling_peaks_arpat(gene_id, *args, **kwargs)
-                    elif method == "inecik":
-                        pass
-                    total_exp = self.experiment.total_assigned[gene_id]
-                    total_tra = self.translatome.total_assigned[gene_id]
+                    arr, peaks = function(gene_id, *args, **kwargs)
+                    total_exp = np.sum(self.experiment.total_assigned_gene[gene_id])
+                    total_tra = np.sum(self.translatome.total_assigned_gene[gene_id])
+                    random_gene_list.append(gene_id)
                     axes[i1][i2].plot(arr, alpha=0.75, color='gray')
-                    axes[i1][i2].scatter(peaks, [arr[p] for p in peaks], color="blue", alpha=1, s=20)
+                    axes[i1][i2].scatter(peaks, [arr[p] for p in peaks], color="blue", alpha=1, s=15)
                     axes[i1][i2].axes.get_xaxis().set_visible(False)
                     axes[i1][i2].axes.get_yaxis().set_visible(False)
-                    axes[i1][i2].text(0, 0, f"{gene_id}::    {total_exp} - {total_tra}", fontsize=6, transform=axes[i1][i2].transAxes)
+                    axes[i1][i2].text(0, 0, f"{gene_id}: {total_exp} - {total_tra}", fontsize=6, transform=axes[i1][i2].transAxes)
             plt.tight_layout()
             plt.show()
+        return random_gene_list
 
 
 class RiboSeqSelective(RiboSeqExperiment):
@@ -873,7 +868,7 @@ class RiboSeqSelective(RiboSeqExperiment):
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
     def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
         pass
@@ -884,7 +879,7 @@ class RiboSeqCoco(RiboSeqExperiment):
     def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, assignment: int,
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_monosome, sam_paths_disome, "cocoassembly", assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes = exclude_genes, verbose = verbose, recalculate = recalculate)
+        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
         self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_on_{self.riboseq_assign_to}_fitting_calculations.joblib")
         self.n_core = multiprocessing.cpu_count()
@@ -966,7 +961,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             best_model.append(self.binomial_fitting_gene(gene_id))
         return best_model
 
-    def create_BF(self, gene_id):  # BF = binomial fitting instance
+    def create_bf(self, gene_id):  # BF = binomial fitting instance
         # below lines are identical to plot results
         disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
         monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
@@ -974,7 +969,7 @@ class RiboSeqCoco(RiboSeqExperiment):
         return BinomialFitting(x_data, disome_counts, monosome_counts)
 
     def binomial_fitting_gene(self, gene_id):
-        fitter_instance = self.create_BF(gene_id)
+        fitter_instance = self.create_bf(gene_id)
         winner_model, model_names, bic_scores, raw_fitting = fitter_instance.select_correct_model()
         return {"winner_model": winner_model,
                 "gene_length": self.experiment.gene_assignments[gene_id].shape[1],
@@ -993,7 +988,7 @@ class RiboSeqCoco(RiboSeqExperiment):
         elif model_name == "dsig":
             return BinomialFitting.model_dsig(x_data, *results["raw_fitting"]["dsig"].x)
 
-    def calculate_onset(self,gene_id, model_name=None):
+    def calculate_onset(self, gene_id, model_name=None):
 
         def helper(p_ind, p_i, p_j, p_y_mid):
             return p_ind if abs(p_i - p_y_mid) < abs(p_j - p_y_mid) else p_ind + 1
@@ -1026,7 +1021,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             return np.nan
         else:
             arr = self.calculate_curve(gene_id, model_name=model_name)
-            marr = smooth(np.round(arr, 2), window_len=15, window="hanning")  # smooth and round
+            marr = smooth_array(np.round(arr, 2), window_len=15, window="hanning")  # smooth and round
             # todo: fonksiyon yerine açık açık yaz
             derivative = np.gradient(marr)
             descending = np.sum(derivative < 0)
@@ -1037,7 +1032,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             elif model_name == "ssig":
                 max_value = arr.max()
                 return find_onset(arr, max_value)
-            elif model_name == "dsig" and descending != 0 and ascending == 0: # negative sigmoid!, only descents
+            elif model_name == "dsig" and descending != 0 and ascending == 0:  # negative sigmoid!, only descents
                 return np.nan
             elif model_name == "dsig" and descending == 0 and ascending != 0:
                 max_value = arr.max()
@@ -1050,27 +1045,30 @@ class RiboSeqCoco(RiboSeqExperiment):
             else:
                 raise AssertionError("Unexpected error!")
 
-    def plot_result(self, gene_id, also_print=True, model_name=None):
-        results = self.best_model[gene_id]
-        if not model_name:
-            model_name = results["winner_model"]
-        # below lines are identical to createBD
-        f = self.create_BF(gene_id)
-        onset = self.calculate_onset(gene_id, model_name=model_name)
-        plt.plot(self.calculate_curve(gene_id, model_name="base"), color='black')
-        plt.plot(self.calculate_curve(gene_id, model_name="ssig"), color='blue')
-        plt.plot(self.calculate_curve(gene_id, model_name="dsig"), color='red')
-        plt.vlines(onset, 0, 1, color="blue", alpha=0.75)
-        plt.scatter(f.x_data, f.disome / (f.disome + f.monosome), alpha=0.25, color='gray')
-        plt.show()
-        if also_print:
-            print(f"base::\nBic: {results['bic_scores']['base']}\nFun: {results['raw_fitting']['base'].fun}\n")
-            print(f"ssig::\nBic: {results['bic_scores']['ssig']}\nFun: {results['raw_fitting']['ssig'].fun}\n")
-            print(f"dsig::\nBic: {results['bic_scores']['dsig']}\nFun: {results['raw_fitting']['dsig'].fun}\n")
+    def plot_result(self, gene_id, verbose=False, model_name=None):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            results = self.best_model[gene_id]
+            if not model_name:
+                model_name = results["winner_model"]
+            # below lines are identical to createBD
+            f = self.create_bf(gene_id)
+            onset = self.calculate_onset(gene_id, model_name=model_name)
+            plt.plot(self.calculate_curve(gene_id, model_name="base"), color='black')
+            plt.plot(self.calculate_curve(gene_id, model_name="ssig"), color='blue')
+            plt.plot(self.calculate_curve(gene_id, model_name="dsig"), color='red')
+            plt.vlines(onset, 0, 1, color="blue", alpha=0.75)
+            plt.scatter(f.x_data, f.disome / (f.disome + f.monosome), alpha=0.25, color='gray')
+            plt.show()
+            if verbose:
+                print(f"base::\nBic: {results['bic_scores']['base']}\nFun: {results['raw_fitting']['base'].fun}\n")
+                print(f"ssig::\nBic: {results['bic_scores']['ssig']}\nFun: {results['raw_fitting']['ssig'].fun}\n")
+                print(f"dsig::\nBic: {results['bic_scores']['dsig']}\nFun: {results['raw_fitting']['dsig'].fun}\n")
             print(f"Winner: {model_name}\nOnset: {onset}")
 
 # TODO: benim coco datası 3-nucleotide periodicity gösteriyor mu
 # TODO: KARAR: infrastructure'da neleri nasıl koyucaz burada
+
 
 class BinomialFitting:
 
@@ -1102,13 +1100,13 @@ class BinomialFitting:
     # RuntimeWarning: invalid value encountered in subtract df = fun(x) - f0
     # np.nan
 
-    def neg_log_likelihood_base(self,param):
+    def neg_log_likelihood_base(self, param):
         # The same calculation at model_base(), but for all x_data
         y_predicted = self.model_base(self.x_data, *param)
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
         return negative_log_likelihood
 
-    def neg_log_likelihood_ssig(self,param):
+    def neg_log_likelihood_ssig(self, param):
         # The same calculation at model_ssig(), but for all x_data
         y_predicted = self.model_ssig(self.x_data, *param)
         negative_log_likelihood = -np.sum(stats.binom.logpmf(k=self.disome, n=self.n_trial, p=y_predicted))
@@ -1122,7 +1120,7 @@ class BinomialFitting:
 
     def minimize_base(self, seed=1):
         x0 = np.array([0.5])
-        bounds = ((0,1),)
+        bounds = ((0, 1),)
         minimizer_kwargs = {"method": "SLSQP", "bounds": bounds}
         return basinhopping(func=self.neg_log_likelihood_base, x0=x0, minimizer_kwargs=minimizer_kwargs,
                             seed=seed, niter=150, stepsize=1, interval=50, T=10000)
@@ -1141,23 +1139,24 @@ class BinomialFitting:
         return basinhopping(func=self.neg_log_likelihood_dsig, x0=x0, minimizer_kwargs=minimizer_kwargs,
                             seed=seed, niter=900, stepsize=1, interval=10, T=10000)
 
-    def calculate_BIC(self, minimized_result):  # Bayesian Information Criterion
+    def calculate_bic(self, minimized_result):  # Bayesian Information Criterion
         # BIC = -2 * LL + log(N) * k
         # Where log() has the base-e called the natural logarithm, LL is the log-likelihood of the model, N is the number of examples in the training dataset, and k is the number of parameters in the model.
         # The score as defined above is minimized, e.g. the model with the lowest BIC is selected.
         k = len(minimized_result.x)
-        LL = -minimized_result.fun
-        N = len(self.x_data)
-        return -2 * LL + np.log(N) * k
+        ll = -minimized_result.fun
+        n = len(self.x_data)
+        return -2 * ll + np.log(n) * k
 
     def select_correct_model(self, seed=1):
         models = ["base", "ssig", "dsig"]
         minimized_results = (self.minimize_base(seed), self.minimize_ssig(seed), self.minimize_dsig(seed))
-        bic = [self.calculate_BIC(i) for i in minimized_results]
+        bic = [self.calculate_bic(i) for i in minimized_results]
         winner = sorted(zip(bic, models))[0]
         return winner[1], models, bic, minimized_results
 
     # p = BinomialFitting(np.arange(1,100), np.arange(99), np.ones(99)*100)
+
 
 class UniprotAnnotation:
 
@@ -1303,80 +1302,66 @@ def reduce_range_list(ranges):
     return reduced  # Return the solution
 
 
-def progress_bar(iteration, total, prefix='Progress:', suffix='', decimals=1, bar_length=20):
+def progress_bar(iteration: int, total: int, prefix: str = 'Progress:', suffix: str = '', decimals: int = 1,
+                 bar_length: int = 20, verbose: bool = False):
     """
     This function should be called inside of loop, gives the loop's progress.
-    :param iteration: It is integer. It is current iteration.
-    :param total: It is integer. It is total iteration.
-    :param prefix: It is string. It will be placed before progress bar.
-    :param suffix: It is string. It will be placed after progress bar.
-    :param decimals: It is integer. It is number of decimals in percent complete.
-    :param bar_length: It is integer. It is character length of bar.
-    :return: It is void function. Nothing is returned.
+    :param iteration: Current iteration.
+    :param total: Total iteration.
+    :param prefix: Placed before progress bar.
+    :param suffix: Placed after progress bar.
+    :param decimals: Number of decimals in percent complete.
+    :param bar_length: Character length of bar.
+    :param verbose: For convenience in some uses
+    :return: Void function. Nothing is returned.
     """
-    filled_length = int(round(bar_length * iteration / float(total)))
-    percents = round(100.00 * (iteration / float(total)), decimals)
-    bar = '█' * filled_length + '-' * (bar_length - filled_length)
-    sys.stdout.write('\r%s |%s| %s%s %s' % (prefix, bar, percents, '%', suffix)),
-    sys.stdout.flush()
-    if iteration == total:
-        sys.stdout.write('\n')
+    if verbose:
+        filled_length = int(round(bar_length * iteration / float(total)))
+        percents = round(100.00 * (iteration / float(total)), decimals)
+        bar = '█' * filled_length + '-' * (bar_length - filled_length)
+        sys.stdout.write('\r%s |%s| %s%s %s' % (prefix, bar, percents, '%', suffix)),
         sys.stdout.flush()
+        if iteration == total:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
 
 
-def smooth(x, window_len=15, window='hanning'):
-    '''
-    Smooth the data using a window with requested size.
-    Adapted from:
-    http://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
-
-    This method is based on the convolution of a scaled window with the signal.
-    The signal is prepared by introducing reflected copies of the signal
-    (with the window size) in both ends so that transient parts are minimized
-    in the begining and end part of the output signal.
-    input:
-        x: the input signal
-        window_len: the dimension of the smoothing window; should be an odd integer
-        window: the type of window from 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'
-            flat window will produce a moving average smoothing.
-    output:
-        the smoothed signal
-
-    example:
-    t=linspace(-2,2,0.1)
-    x=sin(t)+randn(len(t))*0.1
-    y=smooth(x)
-    see also:
-    numpy.hanning, numpy.hamming, numpy.bartlett, numpy.blackman, numpy.convolve
-    scipy.signal.lfilter
-    TODO: the window parameter could be the window itself if an array instead of a string
-    NOTE: length(output) != length(input), to correct this:
-    return y[(window_len/2-1):-(window_len/2)] instead of just y.
-    '''
-
-    if window_len < 3:  return x
-
-    if x.ndim != 1: raise (Exception('smooth only accepts 1 dimension arrays.'))
-    if x.size < window_len:  raise (Exception('Input vector needs to be bigger than window size.'))
-    win_type = ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']
-    if window not in win_type: raise (Exception('Window type is unknown'))
-
+def smooth_array(x: np.ndarray, window_len: int = 15, window: str = 'hanning') -> np.ndarray:
+    """
+    Smooth the data using a window with requested size. This method is based on the convolution of a scaled window
+    with the signal. The signal is prepared by introducing reflected copies of the signal (with the window size) in
+    both ends so that transient parts are minimized in the beginning and end part of the output signal.
+    Adapted from: http://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
+    :param x: The input signal
+    :param window_len: The dimension of the smoothing window.
+    :param window: The type of window from 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'.
+    Note that flat window will produce a moving average smoothing.
+    :return: The smoothed signal
+    """
+    # Check if the parameters are set correctly.
+    assert x.ndim == 1, "Error: smooth() only accepts 1 dimension arrays."
+    assert x.size >= window_len, "Error: Input vector needs to be bigger than window size."
+    assert window in ('flat', 'hanning', 'hamming', 'bartlett', 'blackman'), "Error: Window type is unknown"
+    assert window_len % 2 == 1, "Window length should be odd integer."
+    # No need for further calculation if window length is smaller than 3
+    if window_len < 3:
+        return x
+    # Create the kernel for convolution and calculate the convolution
     s = np.r_[x[window_len - 1:0:-1], x, x[-2:-window_len - 1:-1]]
-    # print(len(s))
-    if window == 'flat':  # moving average
-        w = np.ones(window_len, 'd')
-    else:
-        w = eval('np.' + window + '(window_len)')
-
+    w = np.ones(window_len, 'd') if window == 'flat' else eval('np.' + window + '(window_len)')
     y = np.convolve(w / w.sum(), s, mode='valid')
-
-    # saesha modify
+    # Correct the shape of the result
     ds = y.shape[0] - x.shape[0]  # difference of shape
-    dsb = ds // 2  # [almsot] half of the difference of shape for indexing at the begining
+    dsb = ds // 2  # [almost] half of the difference of shape for indexing at the beginning
     dse = ds - dsb  # rest of the difference of shape for indexing at the end
     y = y[dsb:-dse]
-
+    # Return the result
     return y
+
+
+def print_verbose(verbose, message):
+    if verbose:
+        print(message)
 
 
 class Col:
@@ -1389,62 +1374,6 @@ class Col:
     ENDC = '\033[0m'
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
-
-
-def gtf_cds_parser(gtf_path, verbose=False):
-    """
-    This is to convert gtf file into list of dictionary elements.
-    :param verbose: Boolean. Report or not report the progress.
-    :param gtf_path: String. Path of the gtf or gtf.gz file
-    :return: List of dictionaries for each entry
-    """
-    # Column names for GTF file. Source: https://www.ensembl.org/info/website/upload/gff.html
-    columns = ["seqname", "source", "feature", "start", "end", "score", "strand", "frame"]
-    assert os.path.splitext(gtf_path)[1] == ".gtf"
-    with open(gtf_path, "r") as gtf_handle:  # Open and read the file
-        gtf = gtf_handle.readlines()
-    # Remove the titles, strip the trailing white spaces, split the line into cells
-    gtf = [i.strip().split('\t') for i in gtf if not i.startswith('#')]
-    output = list()
-    filter_columns = ["protein_id", "transcript_id", "gene_name", "start", "end", "strand", "frame", "seqname", "exon_number"]
-    for ind, the_line in enumerate(gtf):  # Parse the entries
-        # Parse the attributes column, column 9, of each line
-        # noinspection PyTypeChecker
-        entry = dict(  # Get the result as dictionary
-            [[k, l.replace("\"", "")] for k, l in  # 4) Remove double quote from value
-             [j.strip().split(" ", 1) for j in  # 3) For each attribute split key from value
-              the_line[8].split(';')  # 1) Split first with ';'
-              if j]])  # 2) See if element contains anything (last character is ';', to remove the artifact of it)
-        entry.update(dict(zip(columns, the_line[:8])))  # Append dictionary with remaining information (Info in columns)
-        # noinspection PyTypeChecker
-        if entry["feature"] == "CDS":
-            output.append([entry[ft] if ft in entry else np.nan for ft in filter_columns])
-        if verbose and (ind % 100 == 0 or ind == len(gtf) - 1):  # Show the progress if 'verbose' is True
-            progress_bar(ind, len(gtf) - 1)
-    return pd.DataFrame(output, columns=filter_columns)
-
-
-def download_gtf_refseq(temp_repo_dir, data_url=None):
-    """
-    Function is to download or find the file in temp_repo_dir.
-    :param temp_repo_dir: Directory to download or find the file
-    :return: String. Path of gtf or gtf.gz
-    """
-    if not data_url:
-        data_url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.38_GRCh38.p12/" \
-                   "GCF_000001405.38_GRCh38.p12_genomic.gtf.gz"
-    gtf_file = os.path.basename(data_url)  # File name in the FTP server
-    # Paths to download the database or look for the database if it already exists
-    gtf_gz_path = os.path.join(temp_repo_dir, gtf_file)  # Compressed .gz format
-    gtf_path = os.path.splitext(gtf_gz_path)[0]  # Not compressed
-    if os.access(gtf_path, os.R_OK) or os.path.isfile(gtf_path):  # Check if the file exist
-        return gtf_path  # Return the path if it exist
-    else:  # Download otherwise
-        subprocess.run((f"cd {temp_repo_dir}; "
-                        f"curl -L -R -O {data_url}; "
-                        f"gzip -d {gtf_file}"), shell=True)
-        assert os.path.isfile(gtf_path) and os.access(gtf_path, os.R_OK)
-        return gtf_path  # Return the compressed file
 
 
 # End

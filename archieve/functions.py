@@ -1,69 +1,67 @@
+"""
+Some functions previously written.
+"""
+
+import os
 import numpy as np
+import subprocess
+import pandas as pd
+from infrastructure.main import progress_bar
 
 
-def smooth(x, window_len=15, window='hanning'):
-    '''
-    Smooth the data using a window with requested size.
-    Adapted from:
-    http://scipy-cookbook.readthedocs.io/items/SignalSmooth.html
+def gtf_cds_parser(gtf_path, verbose=False):
+    """
+    This is to convert gtf file into list of dictionary elements.
+    :param verbose: Boolean. Report or not report the progress.
+    :param gtf_path: String. Path of the gtf or gtf.gz file
+    :return: List of dictionaries for each entry
+    """
+    # Column names for GTF file. Source: https://www.ensembl.org/info/website/upload/gff.html
+    columns = ["seqname", "source", "feature", "start", "end", "score", "strand", "frame"]
+    assert os.path.splitext(gtf_path)[1] == ".gtf"
+    with open(gtf_path, "r") as gtf_handle:  # Open and read the file
+        gtf = gtf_handle.readlines()
+    # Remove the titles, strip the trailing white spaces, split the line into cells
+    gtf = [i.strip().split('\t') for i in gtf if not i.startswith('#')]
+    output = list()
+    filter_columns = ["protein_id", "transcript_id", "gene_name", "start", "end",
+                      "strand", "frame", "seqname", "exon_number"]
+    for ind, the_line in enumerate(gtf):  # Parse the entries
+        # Parse the attributes column, column 9, of each line
+        # noinspection PyTypeChecker
+        entry = dict(  # Get the result as dictionary
+            [[k, l.replace("\"", "")] for k, l in  # 4) Remove double quote from value
+             [j.strip().split(" ", 1) for j in  # 3) For each attribute split key from value
+              the_line[8].split(';')  # 1) Split first with ';'
+              if j]])  # 2) See if element contains anything (last character is ';', to remove the artifact of it)
+        entry.update(dict(zip(columns, the_line[:8])))  # Append dictionary with remaining information (Info in columns)
+        # noinspection PyTypeChecker
+        if entry["feature"] == "CDS":
+            output.append([entry[ft] if ft in entry else np.nan for ft in filter_columns])
+        if verbose and (ind % 100 == 0 or ind == len(gtf) - 1):  # Show the progress if 'verbose' is True
+            progress_bar(ind, len(gtf) - 1)
+    return pd.DataFrame(output, columns=filter_columns)
 
-    This method is based on the convolution of a scaled window with the signal.
-    The signal is prepared by introducing reflected copies of the signal
-    (with the window size) in both ends so that transient parts are minimized
-    in the begining and end part of the output signal.
-    input:
-        x: the input signal
-        window_len: the dimension of the smoothing window; should be an odd integer
-        window: the type of window from 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'
-            flat window will produce a moving average smoothing.
-    output:
-        the smoothed signal
 
-    example:
-    t=linspace(-2,2,0.1)
-    x=sin(t)+randn(len(t))*0.1
-    y=smooth(x)
-    see also:
-    numpy.hanning, numpy.hamming, numpy.bartlett, numpy.blackman, numpy.convolve
-    scipy.signal.lfilter
-    TODO: the window parameter could be the window itself if an array instead of a string
-    NOTE: length(output) != length(input), to correct this:
-    return y[(window_len/2-1):-(window_len/2)] instead of just y.
-    '''
-
-    if window_len < 3:  return x
-
-    if x.ndim != 1: raise (Exception('smooth only accepts 1 dimension arrays.'))
-    if x.size < window_len:  raise (Exception('Input vector needs to be bigger than window size.'))
-    win_type = ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']
-    if window not in win_type: raise (Exception('Window type is unknown'))
-
-    s = np.r_[x[window_len - 1:0:-1], x, x[-2:-window_len - 1:-1]]
-    # print(len(s))
-    if window == 'flat':  # moving average
-        w = np.ones(window_len, 'd')
-    else:
-        w = eval('np.' + window + '(window_len)')
-
-    y = np.convolve(w / w.sum(), s, mode='valid')
-
-    # saesha modify
-    ds = y.shape[0] - x.shape[0]  # difference of shape
-    dsb = ds // 2  # [almsot] half of the difference of shape for indexing at the begining
-    dse = ds - dsb  # rest of the difference of shape for indexing at the end
-    y = y[dsb:-dse]
-
-    return y
-
-def gauss_kern(size, sizey=None):
-    size = int(size)
-    if not sizey:
-        sizey = size
-    else:
-        sizey = int(sizey)
-    x, y = np.mgrid[-size:size+1, -sizey:sizey+1]
-    g = np.exp(-(x**2/float(size)+y**2/float(sizey)))
-    return g / g.sum()
-
-def blur_image(im, n, ny=None):
-    g = gauss_kern(n, sizey=ny)
+def download_gtf_refseq(temp_repo_dir, data_url=None):
+    """
+    Function is to download or find the file in temp_repo_dir.
+    :param temp_repo_dir: Directory to download or find the file
+    :param data_url: URL of the data.
+    :return: String. Path of gtf or gtf.gz
+    """
+    if not data_url:
+        data_url = "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/001/405/GCF_000001405.38_GRCh38.p12/" \
+                   "GCF_000001405.38_GRCh38.p12_genomic.gtf.gz"
+    gtf_file = os.path.basename(data_url)  # File name in the FTP server
+    # Paths to download the database or look for the database if it already exists
+    gtf_gz_path = os.path.join(temp_repo_dir, gtf_file)  # Compressed .gz format
+    gtf_path = os.path.splitext(gtf_gz_path)[0]  # Not compressed
+    if os.access(gtf_path, os.R_OK) or os.path.isfile(gtf_path):  # Check if the file exist
+        return gtf_path  # Return the path if it exist
+    else:  # Download otherwise
+        subprocess.run((f"cd {temp_repo_dir}; "
+                        f"curl -L -R -O {data_url}; "
+                        f"gzip -d {gtf_file}"), shell=True)
+        assert os.path.isfile(gtf_path) and os.access(gtf_path, os.R_OK)
+        return gtf_path  # Return the compressed file
