@@ -10,7 +10,7 @@ import subprocess
 import sys
 import warnings
 import itertools
-import logging
+# import logging  # todo
 
 import joblib
 import numpy as np
@@ -18,7 +18,7 @@ import pandas as pd
 from scipy import stats
 import multiprocessing
 from scipy.optimize import basinhopping
-# from statsmodels.stats.proportion import proportion_confint
+# from statsmodels.stats.proportion import proportion_confint  # todo
 import pyensembl
 import math
 import pysam
@@ -814,9 +814,9 @@ class RiboSeqExperiment:
         positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
         positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
         if smoothen:
-            positions_experiment = smooth_array(positions_experiment, window_len=15, window="hanning")
-            positions_translatome = smooth_array(positions_translatome, window_len=15, window="hanning")
-        return positions_experiment / positions_translatome
+            positions_experiment = smooth_array(positions_experiment, window_len=17, window="flat")
+            positions_translatome = smooth_array(positions_translatome, window_len=17, window="flat")
+        return positions_experiment / (positions_experiment + positions_translatome)
 
 
 class RiboSeqSixtymers(RiboSeqExperiment):
