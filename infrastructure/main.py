@@ -814,8 +814,8 @@ class RiboSeqExperiment:
         positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
         positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
         if smoothen:
-            positions_experiment = smooth_array(positions_experiment, window_len=17, window="flat")
-            positions_translatome = smooth_array(positions_translatome, window_len=17, window="flat")
+            positions_experiment = smooth_array(positions_experiment, window_len=25, window="flat")
+            positions_translatome = smooth_array(positions_translatome, window_len=25, window="flat")
         return positions_experiment / (positions_experiment + positions_translatome)
 
 
@@ -1326,7 +1326,7 @@ def progress_bar(iteration: int, total: int, prefix: str = 'Progress:', suffix: 
             sys.stdout.flush()
 
 
-def smooth_array(x: np.ndarray, window_len: int = 15, window: str = 'hanning') -> np.ndarray:
+def smooth_array(x: np.ndarray, window_len: int, window: str) -> np.ndarray:
     """
     Smooth the data using a window with requested size. This method is based on the convolution of a scaled window
     with the signal. The signal is prepared by introducing reflected copies of the signal (with the window size) in
