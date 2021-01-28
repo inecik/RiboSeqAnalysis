@@ -272,24 +272,26 @@ class ProteinGenome:
             self.save_joblib()
 
     @staticmethod
-    def consistent_coding_ranges(transcript_object: pyensembl.Transcript):
+    def consistent_coding_ranges(transcript_object: pyensembl.Transcript) -> tuple:
         """
-        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-        00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-        :param transcript_object:
-        :return:
+        Main function of the class purpose. Explanation is given as a part of class description above. The function
+        makes the transcript and associated protein sequences consistent, makes number of nucleotides three times
+        amino acid number. As a byproduct, this function also removes stop codon. Function outputs sequences as well as
+        genomic position ranges in the same order (considering the strand) which facilitates the conversions between
+        genome, protein and transcript positions.
+        :param transcript_object: Created by ensembl_release_object_creator() function
+        :return: Tuple of all relevant 'corrected' information for given transcript
         """
 
-        def protein_coding_ranges(transcript_object):
+        def protein_coding_ranges(transcript_object: pyensembl.Transcript) -> list:
             """
             Some transcript has no defined start or stop codon. This causes the pyensembl module to fail in to find
-            coding sequence with coding_sequence method. This function is to replace this method.
-            Tested: for a given transcript, all CDSs are at the same strand.
-            Tested: for a given transcript, coding_sequence_position_ranges method gives CDSs in order.
-            Tested: for transcripts which does not raise error with coding_sequence, this function gives identical results.
+            coding sequence with coding_sequence method. This function is to replace this method. Please note that
+            below conditions are already tested. For a given transcript, all CDSs are at the same strand. For a given
+            transcript, coding_sequence_position_ranges method gives CDSs in order. For transcripts which does not
+            raise error with coding_sequence, this function gives identical results.
             :param transcript_object: Created by ensembl_release_object_creator() function
-            :return: List for Coding sequence. Sequence: "".join([transcript_object.sequence[s: e + 1] for s, e in cdr_relative])
+            :return: Genomic positions of coding sequence as series of ranges.
             """
             transcript_object_exons = transcript_object.exons
             exon_numbers = transcript_object.db.query(select_column_names=["exon_number"], feature="CDS",
@@ -311,7 +313,7 @@ class ProteinGenome:
                 cdr_relative.append(cdr_relative_temp.pop(0))
 
             cdr_relative = [[offset + s, offset + e] for s, e in cdr_relative]  # Bring back skipped exons
-
+            # Sequence: "".join([transcript_object.sequence[s: e + 1] for s, e in cdr_relative])
             return cdr_relative
 
         def transcript_frame(query_transcript, target_protein, table):
