@@ -25,9 +25,15 @@ coco_m = [os.path.join(data_repo_dir, "Coco", i) for i in ["Mono1.sam", "Mono2.s
 
 exclude_genes = ["ENSG00000160789"]
 
-I = Infrastructre(temp_repo_dir, exclude_genes=exclude_genes,
+I = Infrastructre(temp_repo_dir,
+                  exclude_genes=exclude_genes,
+                  riboseq_assign_at=-15,
+                  riboseq_assign_to="best_transcript",
+                  ensembl_release=102,
                   include_gene3d=True,
+                  verbose=True,
                   serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
                   sixtymers=[spt, sps],
                   coco=[coco_m, coco_d])
+
 

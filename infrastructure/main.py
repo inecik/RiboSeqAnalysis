@@ -3,7 +3,6 @@
 """
 
 
-import sys
 import os
 import re
 import subprocess
@@ -26,7 +25,7 @@ from shutil import which
 from Bio.Seq import translate
 from Bio import pairwise2
 import matplotlib.pyplot as plt
-import random
+from scipy.signal import find_peaks, peak_widths, peak_prominences
 
 
 script_path_infrastructure = __file__
@@ -35,7 +34,7 @@ script_path_infrastructure = __file__
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, exclude_genes=list(), ensembl_release=102,
-                 sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-1,
+                 sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-15,
                  include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
@@ -124,7 +123,7 @@ def gene_class_dict_generate(temp_repo_dir, gene_list: list, gene_info_database:
     :param gene_info_names: biomart_mapping() output for 'gene_info_names.R' script.
     :param gene_info_uniprot: biomart_mapping() output for 'gene_info_uniprot.R' script.
     :param recalculate: If True, it will calculate anyway.
-    :param verbose:  If True, it will print to stdout about the process computer currently calculates.
+    :param verbose: If True, it will print to stdout about the process computer currently calculates.
     :return: Dictionary of gene_id → Gene instance
     """
 
@@ -223,10 +222,9 @@ class ProteinGenome:
     Store all transcripts sequence as well as corresponding proteins' sequence. This class is created to solve out some
     problems in the databases that cause my calculations to suffer. For example, for some transcripts that has
     undefined 3' or 5', the length of protein sequence does not match the length of transcript sequence. The methods in
-    this class solves the problem by adding extra Ns to the transcript sequence. Note that there is no example (in
-    Ensembl version 102) that has a transcript length which is longer than protein length (when multiplied with 3, of
-    course); the issue is in the opposite way. In addition to this, the class convert genomic coordinates to protein or
-    transcript ranges and vice versa.
+    this class solves the problem by adding extra Ns to the transcript sequence or trims the nucleotide sequence; the
+    reference point is always protein sequence. In addition to this, the class convert genomic coordinates to protein
+    or transcript ranges and vice versa.
     """
 
     def __init__(self, temp_repo_dir: str, transcript_list: list, ensembl_release_object: pyensembl.Genome,
@@ -235,7 +233,7 @@ class ProteinGenome:
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param transcript_list: List of gene IDs, for which to create the dictionary. Ideally, it should be sorted.
         :param ensembl_release_object: Output of ensembl_release_object_creator()
-        :param verbose:  If True, it will print to stdout about the process computer currently calculates.
+        :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :param recalculate: If True, it will calculate anyway.
         """
         self.transcript_list = sorted(transcript_list)  # Sort the transcript list in case it is not sorted and assign
@@ -253,7 +251,7 @@ class ProteinGenome:
                                        f"{self.output_file_name}{Col.ENDC}.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Load the saved content from the directory.
-            loaded_content = self.load_joblib(self.output_file_name, self.verbose)
+            loaded_content = load_joblib("ProteinGenome", self.output_file_name, self.verbose)
             # Check the current run is consistent with the saved file
             consistent_with = all([  # Make sure all below is True
                 self.transcript_list == loaded_content.transcript_list,  # All transcripts are the same, and sorted.
@@ -269,7 +267,7 @@ class ProteinGenome:
             print_verbose(verbose, f"{Col.HEADER}Protein genome mapping are being calculated.{Col.ENDC}")
             self.db = self.calculate_transcript_mapping(ensembl_release_object)  # Calculate to get the mappings
             # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
-            self.save_joblib()
+            save_joblib(self, self.output_file_name, self.verbose)
 
     @staticmethod
     def consistent_coding_ranges(transcript_object: pyensembl.Transcript) -> tuple:
@@ -280,156 +278,213 @@ class ProteinGenome:
         genomic position ranges in the same order (considering the strand) which facilitates the conversions between
         genome, protein and transcript positions.
         :param transcript_object: Created by ensembl_release_object_creator() function
-        :return: Tuple of all relevant 'corrected' information for given transcript
+        :return: Tuple of all relevant 'corrected' information for given transcript. Namely, (1) correctly ordered
+        CDS genomic ranges without stop codon, (2) protein sequence, (3) CDS without stop codon, (4) chromosome name,
+        (5) strand.
         """
 
-        def protein_coding_ranges(transcript_object: pyensembl.Transcript) -> list:
+        def protein_coding_ranges(tx_object: pyensembl.Transcript) -> list:
             """
             Some transcript has no defined start or stop codon. This causes the pyensembl module to fail in to find
-            coding sequence with coding_sequence method. This function is to replace this method. Please note that
+            coding sequence with coding_sequence method. This function is to replace this method. It outputs a series
+            of ranges without introns, and the positions are starting from 0. This positional ranges will be useful
+            to get CDS sequence from spliced cDNA sequence of transcript.  Please note that
             below conditions are already tested. For a given transcript, all CDSs are at the same strand. For a given
             transcript, coding_sequence_position_ranges method gives CDSs in order. For transcripts which does not
             raise error with coding_sequence, this function gives identical results.
-            :param transcript_object: Created by ensembl_release_object_creator() function
-            :return: Genomic positions of coding sequence as series of ranges.
+            :param tx_object: Created by ensembl_release_object_creator() function
+            :return: Positions of coding sequence as series of ranges.
             """
-            transcript_object_exons = transcript_object.exons
-            exon_numbers = transcript_object.db.query(select_column_names=["exon_number"], feature="CDS",
-                                                      filter_column="transcript_id", filter_value=transcript_object.id)
-            first_coding_exon = int(exon_numbers[0][0]) - 1
+            # Get the exons defined to the transcript as pyensembl.Exon objects
+            transcript_object_exons = tx_object.exons
+            # Make a database query to fetch exons which contains also CDS
+            exon_numbers = tx_object.db.query(select_column_names=["exon_number"], feature="CDS",
+                                              filter_column="transcript_id", filter_value=tx_object.id)
+            first_coding_exon = int(exon_numbers[0][0]) - 1  # Which one is the first coding exon
+            # Assign first coding exon to a variable
             origin_exon = transcript_object_exons[first_coding_exon]
-            offset = ensembl_range_sum(transcript_object.exon_intervals[:first_coding_exon])
-
-            cdr = transcript_object.coding_sequence_position_ranges
-            if transcript_object.strand == "+":
+            # Get the length of the transcript's exons until first coding exon.
+            offset = ensembl_range_sum(tx_object.exon_intervals[:first_coding_exon])
+            cdr = tx_object.coding_sequence_position_ranges  # Get CDS ranges for the transcript
+            # Below if-else statement is to make CDS ranges starting from 0, so it subtracts the first CDS's genomic
+            # starting position from all CDS ranges. However, introns are still there.
+            if tx_object.strand == "+":
                 cdr_relative_temp = [[s - origin_exon.start, e - origin_exon.start] for s, e in cdr]
-            else:  # Notice: it also switches start and end positions of the ranges
+            else:  # Notice it also switches start and end positions of the ranges
                 cdr_relative_temp = [[origin_exon.end - e, origin_exon.end - s] for s, e in cdr]
-
-            cdr_relative = [cdr_relative_temp.pop(0)]
-            while len(cdr_relative_temp) > 0:
-                intron = cdr_relative_temp[0][0] - cdr_relative[-1][1] - 1
+            # Below while statement is to remove introns as well.
+            cdr_relative = [cdr_relative_temp.pop(0)]  # Get the first item directly.
+            while len(cdr_relative_temp) > 0:  # Keep until the last CDS ranges
+                intron = cdr_relative_temp[0][0] - cdr_relative[-1][1] - 1  # Find intron length.
+                # Subtract the intron length from all remaining CDS
                 cdr_relative_temp = [[s - intron, e - intron] for s, e in cdr_relative_temp]
+                # As the first item is corrected, get it.
                 cdr_relative.append(cdr_relative_temp.pop(0))
-
-            cdr_relative = [[offset + s, offset + e] for s, e in cdr_relative]  # Bring back skipped exons
-            # Sequence: "".join([transcript_object.sequence[s: e + 1] for s, e in cdr_relative])
+            # Bring back skipped exons
+            cdr_relative = [[offset + s, offset + e] for s, e in cdr_relative]
+            # Coding sequence: "".join([transcript_object.sequence[s: e + 1] for s, e in cdr_relative])
             return cdr_relative
 
-        def transcript_frame(query_transcript, target_protein, table):
+        def transcript_frame(transcript_as_query: str, protein_as_target: str, table: int) -> int:
+            """
+            Calculates the transcript frame by converting transcript (CDS of the transcript) into protein sequence
+            then aligns to the protein. The frame with best alignment score will be returned at the end.
+            :param transcript_as_query: Transcript (CDS of the transcript) nucleotide sequence
+            :param protein_as_target: Protein amino acid sequence
+            :param table: The conversion table for nucleotide to amino acid transformation. Integer number corresponds
+            to the number at the following link: https://www.ncbi.nlm.nih.gov/Taxonomy/Utils/wprintgc.cgi For human,
+            standard table is '1', mitochondrial table is '2'.
+            :return: Frame, either 1, 2 or 3.
+            """
             with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
-                results = list()
-                for frame_start in range(3):
-                    frame = translate(query_transcript[frame_start:], table=table)
-                    score = pairwise2.align.localxx(frame, target_protein, score_only=True)
-                    if score:
-                        results.append([score, frame_start])
-                assert len(results) > 0, "No alignment"
-                return sorted(results, reverse=True)[0][1]
+                warnings.simplefilter('ignore')  # Translation and alignments throw warnings when success is so low.
+                results = list()  # Initiate a list to keep alignment results.
+                for frame_to_check in range(3):  # Test the alignment for frame 0, 1 and 2.
+                    # Start transcript with appointed frame and then translate to protein sequence.
+                    frame = translate(transcript_as_query[frame_to_check:], table=table)
+                    # Try to align to the target protein sequence.
+                    score = pairwise2.align.localxx(frame, protein_as_target, score_only=True)
+                    if score:  # If a bit of alignment
+                        results.append([score, frame_to_check])  # Append to the list.
+                assert len(results) > 0, "No alignment!"  # Raise an error if there is no alignment at all.
+                return sorted(results, reverse=True)[0][1]  # Sort based on alignment score and report the best frame.
 
-        def find_overhang(query, target, reverse, search_in=10):  # arbitrary 10
+        def find_overhang(query_seq: str, target_seq: str, reverse: bool, search_in: int = 10) -> int:
+            """
+            Compares query and target sequences' beginning (if reverse is False) or end (if reverse if True). It
+            calculates how many nucleotides or amino acids more the target sequence is.
+            :param query_seq: Nucleotides or amino acids sequence
+            :param target_seq: Nucleotides or amino acids sequence
+            :param reverse: To calculate 5' (False) or 3' end overhang
+            :param search_in: Search space from beginning or end of sequences. The function is able to check the
+            overhang with length half of search_in parameter. '10' is chosen arbitrarily after several rounds of
+            trial and error, works well for Ensembl 102, Homo sapiens. Too big numbers causes some IndexError, too small
+            numbers causes unsuccessful operation.
+            :return: How much amino acids or nucleotides are overhung.
+            """
             half_search = math.floor(search_in / 2)
-            target_temp = target[-search_in:][::-1] if reverse else target[:search_in]
-            query_temp = query[-search_in:][::-1] if reverse else query[:search_in]
+            # Get first (or last if reverse is True) 'search_in' elements from both query and target.
+            target_temp = target_seq[-search_in:][::-1] if reverse else target_seq[:search_in]
+            query_temp = query_seq[-search_in:][::-1] if reverse else query_seq[:search_in]
             for query_offset in list(range(0, half_search)):
+                # Get a slice from query with 'search_in / 2' length.
                 query_last = query_temp[query_offset: query_offset + half_search]
+                # Check if you can find the slice in the target (of first/last 'search_in' elements)
                 relative_position = target_temp.find(query_last)
-                if relative_position != -1:
-                    return relative_position - query_offset
-            raise AssertionError("Error in find_overhang")
+                if relative_position != -1:  # If the slice is found
+                    return relative_position - query_offset  # Calculate and return number of the overhung elements.
+                # Move to next iteration to get one element shifted slice.
+            raise AssertionError("Error in find_overhang")  # If not overhung sequence is found, raise an error.
 
-        try:
+        try:  # For transcripts that are not coding, return relevant information here.
+            # Get the CDS ranges of the transcript and convert it to a list.
             coding_position_ranges = [list(i) for i in transcript_object.coding_sequence_position_ranges]
-        except ValueError:  # ValueError: Transcript does not contain feature CDS
-            return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in transcript_object.exon_intervals], \
-                   None, transcript_object.sequence, transcript_object.contig, transcript_object.strand
+        except ValueError:  # ValueError is raised when the transcript does not contain feature CDS.
+            # Return relevant information, explained in the function's explanation above.
+            # Exon ranges instead of CDS. No protein sequence. Whole exons sequence (whole cDNA) instead of CDS only.
+            return ([[i, j] if transcript_object.strand == "+" else [j, i]
+                     for i, j in transcript_object.exon_intervals],
+                    None, transcript_object.sequence, transcript_object.contig, transcript_object.strand)
 
-        if transcript_object.complete:
+        if transcript_object.complete:  # If it has start and stop codons and a coding sequence divisible by 3.
+            # Check below conditions anyway to make sure that the function returns correct result
             assert len(transcript_object.coding_sequence) == len(transcript_object.protein_sequence) * 3 + 3
             assert ensembl_range_sum(coding_position_ranges) == len(transcript_object.protein_sequence) * 3
-            return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in coding_position_ranges], \
-                   transcript_object.protein_sequence, transcript_object.coding_sequence[:-3], transcript_object.contig, transcript_object.strand
-        else:
-            target = transcript_object.protein_sequence
-            query_positions = protein_coding_ranges(transcript_object)
+            # Return relevant information, explained in the function's explanation above.
+            return ([[i, j] if transcript_object.strand == "+" else [j, i] for i, j in coding_position_ranges],
+                    transcript_object.protein_sequence, transcript_object.coding_sequence[:-3],
+                    transcript_object.contig, transcript_object.strand)
+
+        else:  # If the transcript is not complete, use above functions to correct the database information.
+            target = transcript_object.protein_sequence  # Get the protein sequence
+            query_positions = protein_coding_ranges(transcript_object)  # Get positions of CDS as list of ranges.
+            # Get the coding sequence by using the above variable as explained before in protein_coding_ranges().
             query_transcript = "".join([transcript_object.sequence[s: e + 1] for s, e in query_positions])
+            # Use a proper translation table according to the transcript's contig.
             translate_table = 2 if transcript_object.contig == "MT" else 1
-            frame_start = transcript_frame(query_transcript, target, translate_table)
+            frame_start = transcript_frame(query_transcript, target, translate_table)  # Get the correct frame
             with warnings.catch_warnings():
-                warnings.simplefilter('ignore')
+                warnings.simplefilter('ignore')  # Translation throws unnecessary warnings in some cases.
+                # Get the protein sequence from transcripts CDS
                 query = translate(query_transcript[frame_start:], table=translate_table)
+            # Get rid of stop codon sign if only it is at the end.
             if query[-1] == "*":
-                query = query[:-1]  # Selanosistein falan * oluyor görünüyor çünkü
-            five_overhang = find_overhang(query, target, reverse=False)
-            three_overhang = find_overhang(query, target, reverse=True)
+                query = query[:-1]  # It is because amino acids like selenocysteine looks also '*'
+            five_overhang = find_overhang(query, target, reverse=False)  # Calculate 5' overhang
+            three_overhang = find_overhang(query, target, reverse=True)  # Calculate 3' overhang
             three_overhang_additional = ensembl_range_sum(coding_position_ranges) - frame_start - 3 * len(query)
-
-            mofify5 = -3 * five_overhang + frame_start
-            modify3 = 3 * three_overhang - three_overhang_additional
-
+            modify5 = -3 * five_overhang + frame_start  # Calculate how many nucleotides to add or remove
+            modify3 = 3 * three_overhang - three_overhang_additional  # Calculate how many nucleotides to add or remove
+            # Considering the transcript is at positive strand, change the first and end positions properly
             if transcript_object.strand == "+":
-                coding_position_ranges[0][0] += mofify5
+                coding_position_ranges[0][0] += modify5
                 coding_position_ranges[-1][1] += modify3
             else:
-                coding_position_ranges[0][1] -= mofify5
+                coding_position_ranges[0][1] -= modify5
                 coding_position_ranges[-1][0] -= modify3
-
-            query_transcript = query_transcript[-mofify5:] if mofify5 >= 0 else "N" * -mofify5 + query_transcript
+            # Add 'N' nucleotides to the overhung region, or trim out some nucleotides for both ends.
+            query_transcript = query_transcript[-modify5:] if modify5 >= 0 else "N" * -modify5 + query_transcript
             query_transcript = query_transcript + "N" * modify3 if modify3 >= 0 else query_transcript[:modify3]
-
+            # Check below conditions anyway to make sure that the function returns correct result
             assert ensembl_range_sum(coding_position_ranges) == len(transcript_object.protein_sequence) * 3
             assert len(query_transcript) == len(transcript_object.protein_sequence) * 3
+            # Return relevant information, explained in the function's explanation above.
+            return ([[i, j] if transcript_object.strand == "+" else [j, i] for i, j in coding_position_ranges],
+                    transcript_object.protein_sequence, query_transcript,
+                    transcript_object.contig, transcript_object.strand)
 
-            return [[i, j] if transcript_object.strand == "+" else [j, i] for i, j in coding_position_ranges], \
-                   transcript_object.protein_sequence, query_transcript, transcript_object.contig, transcript_object.strand
-
-    def calculate_transcript_mapping(self, ensembl_release_object):
+    def calculate_transcript_mapping(self, ensembl_release_object: pyensembl.Genome) -> dict:
+        """
+        Runs the consistent_coding_ranges() function for all transcripts in the transcript list of the object.
+        :param ensembl_release_object: Output of ensembl_release_object_creator()
+        :return: Transcript to corrected information dictionary.
+        """
+        # Make sure transcript list is unique
         assert len(np.unique(self.transcript_list)) == len(self.transcript_list)
-        output = dict()
-        for ind, transcript_id in enumerate(self.transcript_list):
-            if self.verbose:
-                progress_bar(ind, len(self.transcript_list) - 1)
-            transcript_object = ensembl_release_object.transcript_by_id(transcript_id)
-            output[transcript_id] = self.consistent_coding_ranges(transcript_object)
+        output = dict()  # Initiate a dictionary to fill up with transcript IDs as keys.
+        for ind, transcript_id in enumerate(self.transcript_list):  # For each transcript in the list,
+            # Print out the current process to stdout as a progress bar.
+            progress_bar(ind, len(self.transcript_list) - 1, verbose=self.verbose)
+            transcript_object = ensembl_release_object.transcript_by_id(transcript_id)  # Create a transcript object
+            output[transcript_id] = self.consistent_coding_ranges(transcript_object)  # Call the function for the info
         return output
 
-    def save_joblib(self):
-        # Write down the output dictionary and list as Joblib object for convenience in later uses.
-        if self.verbose:
-            print(f"{Col.HEADER}Instance is being written to directory: {self.temp_repo_dir}{Col.ENDC}")
-        joblib.dump(self, self.output_file_name)
-        if self.verbose:
-            print(f"Done: {self.output_file_name}")
+    def protein2genome(self, transcript_id: str, start: int, end: int) -> list:
+        """
 
-    @staticmethod
-    def load_joblib(output_file_name, verbose):
-        if verbose:
-            print(f"{Col.HEADER}ProteinGenome instance found in path: {output_file_name}{Col.ENDC}")
-        return joblib.load(output_file_name)
-
-    def protein2genome(self, transcript_id, start, end):
-        transcript = self.db[transcript_id]
-
-        assert 1 <= start <= end <= len(transcript[1]), f"Wrong range for transcript {transcript_id}: min: 1, max: {len(transcript[1])}"
-        start_nt = start * 3 - 3  # -1: convert python index
+        :param transcript_id: Ensembl transcript ID without version.
+        :param start: Start position of the protein range, query start position.
+        :param end: End position of the protein range, query end position.
+        :return: Nested list as genomic ranges
+        """
+        transcript = self.db[transcript_id]  # Get relevant transcript information from the database already prepared.
+        # Check below condition to make sure the function will work successfully.
+        assert 1 <= start <= end <= len(transcript[1]), f"Wrong range for transcript {transcript_id}: " \
+                                                        f"min: 1, max: {len(transcript[1])}"
+        # Convert amino acid positions to nucleotide positions. "-1"s are to make them python index.
+        start_nt = start * 3 - 3
         end_nt = end * 3 - 1
-
-        origin = transcript[0][0][0]
-        cdr_relative_temp = [[i - origin, j - origin] if transcript[4] == "+" else [origin - i, origin - j] for i, j in transcript[0]]
-        cdr_relative = [cdr_relative_temp.pop(0)]
-        introns = [0]
-        while len(cdr_relative_temp) > 0:
-            intron = cdr_relative_temp[0][0] - cdr_relative[-1][1] - 1
+        origin = transcript[0][0][0]  # The first nucleotide of the transcript.
+        # Below if-else statement is to make CDS ranges starting from 0, so it subtracts the first CDS's genomic
+        # starting position from all CDS ranges. Introns are also removed and saved.
+        cdr_relative_temp = [[i - origin, j - origin] if transcript[4] == "+" else [origin - i, origin - j]
+                             for i, j in transcript[0]]
+        cdr_relative = [cdr_relative_temp.pop(0)]  # Get the first item directly.
+        introns = [0]  # Initiate the list for intron lengths, first intron is assumed to be 0 for convenience.
+        while len(cdr_relative_temp) > 0:  # Keep until the last CDS ranges
+            intron = cdr_relative_temp[0][0] - cdr_relative[-1][1] - 1  # Find intron length.
+            # Subtract the intron length from all remaining CDS
             cdr_relative_temp = [[s - intron, e - intron] for s, e in cdr_relative_temp]
+            # As the first item is corrected, get it.
             cdr_relative.append(cdr_relative_temp.pop(0))
-            introns.append(intron)
-
-        introns = list(itertools.accumulate(introns))
+            introns.append(intron)  # Also save the intron length.
+        # The logic is similar to what is done in protein_coding_ranges()
+        introns = list(itertools.accumulate(introns))  # Calculate total introns until corresponding CDS.
         output_relative_introns = list()
+        # Below is to calculate the genomic ranges, corresponding to the query protein range.
         for ind, (cdr_start, cdr_end) in enumerate(cdr_relative):
             if start_nt > cdr_end:
-                continue
+                continue  # Query range is not covered by this CDS range.
             elif cdr_start <= start_nt <= cdr_end and cdr_start <= end_nt <= cdr_end:
                 output_relative_introns.append([start_nt + introns[ind], end_nt + introns[ind]])
                 break
@@ -441,121 +496,152 @@ class ProteinGenome:
                 output_relative_introns.append([cdr_start + introns[ind], end_nt + introns[ind]])
             else:
                 break
-
-        return [[i + origin, j + origin] if transcript[4] == "+" else [origin - i, origin - j] for i, j in output_relative_introns]
-
-    @staticmethod
-    def genome_to_sequences(self, chromosome, ranges):
-        pass
+        # Add the origin, the first nucleotide of the transcript, to the genomic ranges.
+        # Output ranges are in the same order with the transcript.
+        return [[i + origin, j + origin] if transcript[4] == "+" else [origin - i, origin - j]
+                for i, j in output_relative_introns]
 
 
 class EnsemblDomain:
+    """
+    This class has a data frame containing all protein domains of a given database. Each domain is appointed to
+    a Ensembl protein ID. The class can return all domains of the database for a given transcript. The domain positions
+    are kept as genomic ranges as well as protein positions. By means of ProteinGenome object, the conversion between
+    protein, transcript and genome positions are quite easy.
+    """
 
-    def __init__(self, temp_repo_dir, rscript, protein_genome_instance=None, ensembl_release_object=None, ensembl_release=102, verbose=True, recalculate=False):
+    # todo: The class can return all domains of a transcript
+
+    def __init__(self, temp_repo_dir: str, rscript: str, protein_genome_instance: ProteinGenome,
+                 ensembl_release_object: pyensembl.Genome, ensembl_release: int = 102,
+                 verbose: bool = True, recalculate: bool = False):
+        """
+        :param temp_repo_dir: Full path directory where temporary files will be stored.
+        :param rscript: Absolute path of R-Script, which fetches data from Ensembl. Check one of the script (e.g.
+        gene3d.R) as a reference to properly use this class.
+        :param protein_genome_instance: An instance of ProteinGenome class
+        :param ensembl_release_object: Output of ensembl_release_object_creator()
+        :param ensembl_release: Ensembl release version
+        :param verbose: If True, it will print to stdout about the process computer currently calculates.
+        :param recalculate: If True, it will calculate anyway.
+        """
         self.temp_repo_dir = temp_repo_dir
         self.rscript = rscript
         self.base_name = os.path.split(os.path.splitext(self.rscript)[0])[1]
-        self.data_path = os.path.join(self.temp_repo_dir, f"{self.base_name}.txt")
         self.output_file_name = os.path.join(self.temp_repo_dir, f"{self.base_name}.joblib")
         self.ensembl_release = ensembl_release
         self.verbose = verbose
         self.recalculate = recalculate
 
         try:
+            # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
-            if self.recalculate:
-                print(f"{Col.WARNING}Saved file is found at the path but 'recalculate=True': {self.output_file_name}{Col.ENDC}.")
-                raise AssertionError
-            loaded_content = self.load_joblib(self.output_file_name, self.base_name, self.verbose)
-            consistent_with = all([
-                self.base_name == loaded_content.base_name,
-                self.ensembl_release == loaded_content.ensembl_release
+            if self.recalculate:  # If 'recalculate' is True,
+                print_verbose(verbose, f"{Col.WARNING}Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}{Col.ENDC}.")
+                raise AssertionError  # Raise the error to go to the except statement.
+            # Load the saved content from the directory.
+            loaded_content = load_joblib(f"EnsemblDomain for {self.base_name}", self.output_file_name, self.verbose)
+            # Check the current run is consistent with the saved file
+            consistent_with = all([  # Make sure all below is True
+                self.base_name == loaded_content.base_name,  # The same domains are fetched.
+                self.ensembl_release == loaded_content.ensembl_release  # The same ensembl release is used.
             ])
-            if not consistent_with:
-                print(f"{Col.WARNING}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.ENDC}")
-                raise AssertionError
+            if not consistent_with:  # If there is a problem, the stored does not match with current run.
+                print_verbose(verbose, f"{Col.WARNING}There is at least one inconsistency between input parameters and "
+                                       f"loaded content. Recalculating.{Col.ENDC}")
+                raise AssertionError  # Raise the error to go to the except statement.
+            # Otherwise, just accept the database saved in previous run.
             self.df = loaded_content.df
             self.columns = loaded_content.columns
-        except (AssertionError, AttributeError, FileNotFoundError):
-            assert protein_genome_instance, "Undefined protein_genome_instance."
-            assert ensembl_release_object, "Undefined ensembl_release_object."
-            print(f"{Col.HEADER}Ensembl domains are being calculated: {self.base_name}{Col.ENDC}")
-            self.df = biomart_mapping(self.temp_repo_dir, self.rscript, self.ensembl_release)
+        except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
+            print_verbose(verbose, f"{Col.HEADER}Ensembl domains are being calculated: {self.base_name}{Col.ENDC}")
+            self.df = biomart_mapping(self.temp_repo_dir, self.rscript, self.ensembl_release)  # Get the annotations
             self.columns = self.df.columns
-            self.convert2genome(protein_genome_instance, ensembl_release_object)
-            self.save_joblib()
+            self.convert2genome(protein_genome_instance, ensembl_release_object)  # Get genome coordinates as well.
+            # Save the resulting data frame into a joblib file to load without calculating again in next runs.
+            save_joblib(self, self.output_file_name, self.verbose)
 
-    def convert2genome(self, protein_genome_instance, ensembl_release_object):
+    def convert2genome(self, protein_genome_instance: ProteinGenome, ensembl_release_object: pyensembl.Genome):
+        """
+        Calculates genomic coordinates of the domains.
+        :param protein_genome_instance: An instance of ProteinGenome class
+        :param ensembl_release_object: Output of ensembl_release_object_creator()
+        :return: None. Function changes the object's main data frame.
+        """
+        # R-Script should be in such a format that satisfy below three lines.
         protein_ids = self.df[self.columns[0]]
         domain_starts = self.df[self.columns[1]]
         domain_ends = self.df[self.columns[2]]
-        coordinates_ranges = list()
-        coordinates_contig = list()
+        # Initiate lists to fill up with conversion calculations.
+        coordinates_ranges, coordinates_contig = list(), list()
+        # For each domain in the database
         for ind, (protein_id, domain_start, domain_end) in enumerate(zip(protein_ids, domain_starts, domain_ends)):
-            if self.verbose:
-                progress_bar(ind, len(protein_ids) - 1)
+            # Print out the current process to stdout as a progress bar.
+            progress_bar(ind, len(protein_ids) - 1, verbose=self.verbose)
+            # Get the transcript ID corresponding to the protein ID
             transcript_id = ensembl_release_object.transcript_id_of_protein_id(protein_id)
-            # orientation doğru mu???
+            # Using the ProteinGenome object, calculate the genomic coordinates corresponding to the domains.
             coordinates_ranges.append(protein_genome_instance.protein2genome(transcript_id, domain_start, domain_end))
             coordinates_contig.append(protein_genome_instance.db[transcript_id][3])
+        # Add these newly filled lists as a new columns to the object's main data frame.
         self.df["genome_chromosome"] = coordinates_contig
         self.df["genome_coordinate"] = coordinates_ranges
 
-    def save_joblib(self):
-        # Write down the output dictionary and list as Joblib object for convenience in later uses.
-        if self.verbose:
-            print(f"{Col.HEADER}Instance is being written to directory: {self.temp_repo_dir}{Col.ENDC}")
-        joblib.dump(self, self.output_file_name)
-        if self.verbose:
-            print(f"Done: {self.output_file_name}")
 
-    @staticmethod
-    def load_joblib(output_file_name, base_name, verbose):
-        if verbose:
-            print(f"{Col.HEADER}Ensembl database instance found for {base_name} in path: {output_file_name}{Col.ENDC}")
-        return joblib.load(output_file_name)
-
-# TODO: co-co site'ı hesaplayan fitting şeyi yaz: coco_site'ı eklemlendir.
-#   fitting'de gerçekten raw sayılar mı yoksa rpkm falan mı?
+# TODO:
 #   makaledeki şeyleri eksiksiz eklemlendir (rpkm, ci, rolling window etc.)
 #   lowCI highCI falan hesapla, kolaysa metagene'i de eklemlendir değilse boşver
-#   arpat yöntemine göz at, doğru yazıldığından emin ol
-#   birkaç peak detection tool'u ekle
 #   conservation'u ekle
 #   gene class'ını bitir.
 #   uniprot'u eklemeden önce infrastructure'ı bitir ve buralara
 #   bol bol açıklama ekle. bütün koda (protein_sequence asıl: nedenini açıkla)
 
-# TODO: SORU: Sadece protein coding mi, yoksa her şey mi?
-# şu anda bütün genleri alıyor rrna falan dahil, bu rpkm'i yapay olarak arttıracaktır..
-# alignment'da değil sadece burada protein-coding only demeliyiz bence. en başta infrastructure'ı oluştururken
 
 class RiboSeqAssignment:
+    """
+    This class calculates RiboSeq assignment for replicates from a list of SAM files. It also saves the assignment as
+    joblib file to be used in later analysis. It can calculate RPKM and RPM for genes and gene positions.
+    """
 
-    def __init__(self, sam_paths: list, temp_repo_dir: str, assignment: int, selection: str, riboseq_group: str,
-                 protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, verbose=True, recalculate=False):
-        # :param riboseq_group: String to identify the RiboSeq experiment annotation; like "translatome" or "60mers"
+    def __init__(self, sam_paths: list, temp_repo_dir: str, riboseq_assign_at: int, riboseq_assign_to: str,
+                 riboseq_group: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 verbose: bool = True, recalculate: bool = False):
+        """
+        :param sam_paths: List of absolute path of SAM files, which are replicates of each other.
+        :param temp_repo_dir: Full path directory where temporary files will be stored.
+        :param riboseq_assign_at:
+        :param riboseq_assign_to: 
+        :param riboseq_group: Unique string to identify the RiboSeq experiment. e.g "cocoassembly_monosome"
+        :param protein_genome_instance: An instance of ProteinGenome class
+        :param gene_info_dictionary: Output of gene_class_dict_generate() function
+        :param verbose: If True, it will print to stdout about the process computer currently calculates.
+        :param recalculate: If True, it will calculate anyway.
+        """
         self.sam_paths = sorted(sam_paths)
         self.temp_repo_dir = temp_repo_dir
-        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{selection}.joblib")
+        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{riboseq_assign_to}.joblib")
         self.gene_list = sorted(gene_info_dictionary.keys())
         self.exclude_gene_list = list()
-        self.assignment = assignment
+        self.riboseq_assign_at = riboseq_assign_at
+        self.riboseq_assign_to = riboseq_assign_to
         self.verbose = verbose
-        self.selection = selection
         self.riboseq_group = riboseq_group  # Define riboseq_group variable for a function.
         self.recalculate = recalculate
 
         try:
+            # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
-            if self.recalculate:
-                print(f"{Col.WARNING}Saved file is found at the path but 'recalculate=True': {self.output_file_name}{Col.ENDC}.")
-                raise AssertionError
+            if self.recalculate:  # If 'recalculate' is True,
+                print_verbose(verbose, f"{Col.WARNING}Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}{Col.ENDC}.")
+                raise AssertionError  # Raise the error to go to the except statement.
             loaded_content = self.load_joblib(self.riboseq_group, self.output_file_name, self.verbose)
             consistent_with = all([
                 all([os.path.basename(s) == os.path.basename(l) for s, l in zip(self.sam_paths, loaded_content.sam_paths)]),
                 os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
-                self.assignment == loaded_content.assignment,
+                self.riboseq_assign_at == loaded_content.riboseq_assign_at,
+                self.riboseq_assign_to == loaded_content.riboseq_assign_to,
                 len(self.gene_list) == len(loaded_content.gene_list),
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),
             ])
@@ -594,9 +680,9 @@ class RiboSeqAssignment:
         if self.verbose:
             print(f"{Col.HEADER}CDS ranges of genes are being calculated.{Col.ENDC}")
         # Get array of genomic positions for all genes, create a dictionary out of it.
-        if self.selection == "gene":
+        if self.riboseq_assign_to == "gene":
             positions_gene = {gene_id: gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=True) for gene_id in self.gene_list}
-        elif self.selection == "best_transcript":
+        elif self.riboseq_assign_to == "best_transcript":
             positions_gene = {gene_id: best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, make_array=True) for gene_id in self.gene_list}
         else:
             raise AssertionError("Selection variable must be either 'gene' or 'best_transcript'.")
@@ -604,7 +690,7 @@ class RiboSeqAssignment:
         if self.verbose:
             print(f"{Col.HEADER}Footprint are being assigned to genomic coordinates.{Col.ENDC}")
         # Assign footprints to genomic positions
-        footprint_genome_assignment_list = [self.footprint_assignment(sam_path, assignment=self.assignment, verbose=self.verbose) for sam_path in self.sam_paths]
+        footprint_genome_assignment_list = [self.footprint_assignment(sam_path, assignment=self.riboseq_assign_at, verbose=self.verbose) for sam_path in self.sam_paths]
 
         if self.verbose:
             print(f"{Col.HEADER}Footprint counts are being calculated and assigned to genes.{Col.ENDC}")
@@ -662,8 +748,8 @@ class RiboSeqAssignment:
             for ind, e in enumerate(sam_iterator):  # Iterate through the entries
 
                 # If 'verbose' activated, print the progress bar in a meaningful intervals
-                if verbose and (ind % 1000 == 0 or ind == iteration - 1):
-                    progress_bar(ind, iteration - 1)
+                if ind % 1000 == 0 or ind == iteration - 1:
+                    progress_bar(ind, iteration - 1, verbose=verbose)
 
                 assert sum(e.get_cigar_stats()[1][5:]) == 0, "Make sure cigar string composed of D, I, M, N, S only!"
                 # other than 'D', get_reference_positions method perfectly works.
@@ -684,7 +770,6 @@ class RiboSeqAssignment:
 
                 try:
                     assigned_nucleotide = reference_positions[assignment]
-                    # TODO: PERIODICTY GÖSTERMIYOR!
                 except IndexError:  # if list index out of range
                     counter += 1
                     continue
@@ -719,8 +804,8 @@ class RiboSeqAssignment:
         # For each replicate do the same procedure
         for ind_assignment, footprint_genome_assignment in enumerate(footprint_genome_assignment_list):
             for ind, chr_name in enumerate(footprint_genome_assignment):  # For each chromosome
-                if verbose:  # If 'verbose' activated, print the progress bar
-                    progress_bar(ind, len(footprint_genome_assignment) - 1, suffix=f"    Chromosome: {chr_name}")
+                # If 'verbose' activated, print the progress bar
+                progress_bar(ind, len(footprint_genome_assignment) - 1, suffix=f"    Chromosome: {chr_name}", verbose=verbose)
                 # Get all genomic coordinates assigned to a footprint
                 chr_pos_footprints = footprint_genome_assignment[chr_name]
                 # Get the number of unique elements and the counts of these unique elements
@@ -837,33 +922,164 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return np.nan
         else:
             normalized_rpm = land / mmc
-            return normalized_rpm, normalized_rpm.argsort()[-get_top:][::-1]  # Arbitrarily 5
+            return normalized_rpm.argsort()[-get_top:][::-1]  # Arbitrarily 5
 
-    def stalling_peaks_inecik_1(self):
-        pass
+    def stalling_peaks_inecik_1(self, gene_id, percentile=90, window="hanning", window_len=25,
+                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+        try:
+            assert self.aux_var_inecik_1
+            assert self.aux_var_inecik_1_params == (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+        except (NameError, AssertionError):
+            self.aux_var_inecik_1_params = (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_1 = [exp_rpm_s[find_peaks(exp_rpm_s)[0]] for exp_rpm_s in
+                                     self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)]
+            self.aux_var_inecik_1 = np.log10(np.concatenate(self.aux_var_inecik_1, axis=0))
+        threshold = np.percentile(self.aux_var_inecik_1, percentile)
 
-    def see_examples(self, function, *args, **kwargs):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            x, y = 3, 2
-            fig, axes = plt.subplots(x, y, figsize=(y * 5, x), gridspec_kw={'hspace': 0, 'wspace': 0})
-            random_gene_list = list()
-            for i1 in range(axes.shape[0]):
-                for i2 in range(axes.shape[1]):
-                    gene_id = random.choice(self.gene_list)
-                    arr, peaks = function(gene_id, *args, **kwargs)
-                    total_exp = np.sum(self.experiment.total_assigned_gene[gene_id])
-                    total_tra = np.sum(self.translatome.total_assigned_gene[gene_id])
-                    random_gene_list.append(gene_id)
-                    axes[i1][i2].plot(arr, alpha=0.75, color='gray')
-                    axes[i1][i2].scatter(peaks, [arr[p] for p in peaks], color="blue", alpha=1, s=15)
-                    axes[i1][i2].axes.get_xaxis().set_visible(False)
-                    axes[i1][i2].axes.get_yaxis().set_visible(False)
-                    axes[i1][i2].text(0, 0, f"{gene_id}: {total_exp} - {total_tra}", fontsize=6, transform=axes[i1][i2].transAxes)
-            plt.tight_layout()
-            plt.show()
-        return random_gene_list
+        try:
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            peaks = find_peaks(exp_rpm_s)[0]
+            peak_values = exp_rpm_s[peaks]
+            return peaks[np.log10(peak_values) > threshold]
+        except AssertionError:
+            return np.array([])
 
+    def stalling_peaks_inecik_2(self, gene_id, percentile=90, window="hanning", window_len=25, wlen=290,
+                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+        try:
+            assert self.aux_var_inecik_2
+            assert self.aux_var_inecik_2_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+        except (NameError, AssertionError):
+            self.aux_var_inecik_2_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_2 = list()
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+                peaks, _ = find_peaks(exp_rpm_s)
+                calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+                calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
+                self.aux_var_inecik_2.append(calc_prominences[0] * calc_widths[0])
+            self.aux_var_inecik_2 = np.log10(np.concatenate(self.aux_var_inecik_2, axis=0))
+        threshold = np.percentile(self.aux_var_inecik_2, percentile)
+
+        try:
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            peaks, _ = find_peaks(exp_rpm_s)
+            calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+            calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
+            calc = calc_prominences[0] * calc_widths[0]
+            return peaks[np.log10(calc) > threshold]
+        except AssertionError:
+            return np.array([])
+
+    def stalling_peaks_inecik_3(self, gene_id, probability=0.02, window="hanning", window_len=25, wlen=290,
+                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+
+        try:
+            assert self.aux_var_inecik_3
+            assert self.aux_var_inecik_3_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+        except (NameError, AssertionError):
+            self.aux_var_inecik_3_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            calc_peak_width, calc_peak_prominence = list(), list()
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+                peaks, _ = find_peaks(exp_rpm_s)
+                calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+                calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
+                calc_peak_prominence.extend(list(calc_prominences[0]))
+                calc_peak_width.extend(list(calc_widths[0]))
+
+            calc_peak_width, calc_peak_prominence = np.array(calc_peak_width), np.array(calc_peak_prominence)
+            calc_filter_out = np.log(calc_peak_prominence) > -18
+            calc_peak_width = calc_peak_width[calc_filter_out]
+            calc_peak_prominence = calc_peak_prominence[calc_filter_out]
+
+            params_h_additional = calc_peak_prominence.max()
+            log_calc_peak_prominence = -np.log(calc_peak_prominence / calc_peak_prominence.max())
+            params_h = stats.fisk.fit(log_calc_peak_prominence)
+
+            filt_calc_peak_width = calc_peak_width[calc_peak_width != window_len - 1]
+            params_w = stats.fisk.fit(filt_calc_peak_width)
+
+            self.aux_var_inecik_3 = (params_w, params_h, params_h_additional)
+
+        try:
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            peaks, _ = find_peaks(exp_rpm_s)
+            calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+            calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
+            # probability_prominence
+            log_calc_peak_prominence = -np.log(calc_prominences[0] / self.aux_var_inecik_3[2])
+            peak_prominence_probs = stats.fisk.cdf(log_calc_peak_prominence, *self.aux_var_inecik_3[1])  # because smaller values are higher peaks
+            # probability_width
+            peak_witdhs_probs = 1 - stats.fisk.cdf(calc_widths[0], *self.aux_var_inecik_3[0])
+            bivariate_cumulative = peak_prominence_probs * peak_witdhs_probs
+            return peaks[bivariate_cumulative < probability]
+        except AssertionError:
+            return np.array([])
+
+    def stalling_peaks_inecik_4(self, gene_id, percentile=90, window="hanning", window_len=25, wlen=290,
+                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+        try:
+            assert self.aux_var_inecik_4
+            assert self.aux_var_inecik_4_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+        except (NameError, AssertionError):
+            self.aux_var_inecik_4_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_4 = list()
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+                peaks, _ = find_peaks(exp_rpm_s)
+                calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+                self.aux_var_inecik_4.extend(list(calc_prominences[0]))
+            self.aux_var_inecik_4 = np.log10(np.array(self.aux_var_inecik_4))
+        threshold = np.percentile(self.aux_var_inecik_4, percentile)
+
+        try:
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            peaks, _ = find_peaks(exp_rpm_s)
+            calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
+            return peaks[np.log10(calc_prominences[0]) > threshold]
+        except AssertionError:
+            return np.array([])
+
+    def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+        exp_rpkm = self.experiment.calculate_rpkm_genes(gene_id)
+        tra_rpkm = self.translatome.calculate_rpkm_genes(gene_id)
+        exp_rpm_bs = self.experiment.calculate_rpm_positions(gene_id)
+        assert exp_rpkm > min_rpkm_sixtymers and tra_rpkm > min_rpkm_translatome
+        assert len(exp_rpm_bs) > window_len
+        rpm_gene = self.translatome.calculate_rpm_genes(gene_id)
+        return smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene
+
+    def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+        for gene_id in self.gene_list:
+            try:
+                yield self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            except AssertionError:
+                continue
+
+    def plot_result(self, gene_id, function, *args, **kwargs):
+        total_exp = self.experiment.calculate_rpkm_genes(gene_id)
+        total_tra = self.translatome.calculate_rpkm_genes(gene_id)
+        rpm_tra = self.translatome.calculate_rpm_genes(gene_id)
+        arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=25, window="hanning") / rpm_tra
+        peaks = function(gene_id, *args, **kwargs)
+        # Plot
+        fig, ax = plt.subplots(1, 1, figsize=(7, 2))
+        fig.suptitle(gene_id, y=1.1, fontweight="bold")
+        ax.plot(arr, alpha=1, color="salmon")
+        ax.scatter(peaks, [arr[p] for p in peaks], color="black", alpha=1, s=25)
+        ax.set_ylim(0, arr.max() * 1.35)
+        ax.text(0.01, 0.99, f"{gene_id} / Index {self.gene_list.index(gene_id)}\nRPKMs: {round(total_exp, 2)} - {round(total_tra, 2)}",
+                      fontsize=6, transform=ax.transAxes, verticalalignment='top', horizontalalignment="left")
+        ax.text(0.99, 0.99, f"Max: {round(arr.max(), 5)}\nPeaks: {len(peaks)}", fontsize=6,
+                      transform=ax.transAxes, verticalalignment='top', horizontalalignment="right")
+        ax.axes.get_yaxis().set_visible(False)
+        ax.tick_params(labelsize=6)
+        plt.tight_layout()
+        plt.show()
+
+# TODO: aynı sonuçları mı veriyor?
+#   window_len-1 doğru mu
+#   arpat doğru mu
+#   Array'in başına ve sonuna 0 ekle çünkü baş ve sondaki pikleri algılamıyor
+#   jupyter'daki notlar?
 
 class RiboSeqSelective(RiboSeqExperiment):
 
@@ -958,8 +1174,7 @@ class RiboSeqCoco(RiboSeqExperiment):
     def binomial_fitting_single_core(self, gene_list):
         best_model = list()
         for ind, gene_id in enumerate(gene_list):
-            if self.verbose:
-                progress_bar(ind, len(gene_list) - 1)
+            progress_bar(ind, len(gene_list) - 1, verbose=self.verbose)
             best_model.append(self.binomial_fitting_gene(gene_id))
         return best_model
 
@@ -1024,7 +1239,6 @@ class RiboSeqCoco(RiboSeqExperiment):
         else:
             arr = self.calculate_curve(gene_id, model_name=model_name)
             marr = smooth_array(np.round(arr, 2), window_len=15, window="hanning")  # smooth and round
-            # todo: fonksiyon yerine açık açık yaz
             derivative = np.gradient(marr)
             descending = np.sum(derivative < 0)
             ascending = np.sum(derivative > 0)
@@ -1067,9 +1281,6 @@ class RiboSeqCoco(RiboSeqExperiment):
                 print(f"ssig::\nBic: {results['bic_scores']['ssig']}\nFun: {results['raw_fitting']['ssig'].fun}\n")
                 print(f"dsig::\nBic: {results['bic_scores']['dsig']}\nFun: {results['raw_fitting']['dsig'].fun}\n")
             print(f"Winner: {model_name}\nOnset: {onset}")
-
-# TODO: benim coco datası 3-nucleotide periodicity gösteriyor mu
-# TODO: KARAR: infrastructure'da neleri nasıl koyucaz burada
 
 
 class BinomialFitting:
@@ -1168,6 +1379,10 @@ class UniprotAnnotation:
     @staticmethod
     def download_databases(temp_repo_dir):
         pass
+
+
+class ConservationGerp:
+    pass
 
 
 def biomart_mapping(temp_repo_dir, rscript, release=102):
@@ -1302,6 +1517,18 @@ def reduce_range_list(ranges):
         reduced.append(x)
 
     return reduced  # Return the solution
+
+
+def save_joblib(object_to_dump, absolute_output_path, verbose):
+    # Write down the output dictionary and list as Joblib object for convenience in later uses.
+    print_verbose(verbose, f"{Col.HEADER}Instance is being written to directory.{Col.ENDC}")
+    joblib.dump(object_to_dump, absolute_output_path)
+    print_verbose(verbose, f"Done: {absolute_output_path}")
+
+
+def load_joblib(object_name, output_file_name, verbose):
+    print_verbose(verbose, f"{Col.HEADER}{object_name} found in path: {output_file_name}{Col.ENDC}")
+    return joblib.load(output_file_name)
 
 
 def progress_bar(iteration: int, total: int, prefix: str = 'Progress:', suffix: str = '', decimals: int = 1,
