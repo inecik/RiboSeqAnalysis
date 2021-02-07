@@ -897,12 +897,12 @@ class RiboSeqExperiment:
             self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
 
-    def normalized_rpm_positions(self, gene_id, smoothen=True):
+    def normalized_rpm_positions(self, gene_id, smoothen=True, *args, **kwargs):
         positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
         positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
         if smoothen:
-            positions_experiment = smooth_array(positions_experiment, window_len=25, window="flat")
-            positions_translatome = smooth_array(positions_translatome, window_len=25, window="flat")
+            positions_experiment = smooth_array(positions_experiment, *args, **kwargs)
+            positions_translatome = smooth_array(positions_translatome, *args, **kwargs)
         return positions_experiment / (positions_experiment + positions_translatome)
 
 
@@ -913,23 +913,24 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, "sixtymers", assignment,
         selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
-    def stalling_peaks_arpat(self, gene_id, mmc_threshold=0, normalized_peak_count_thr=0, get_top= 5):
+    def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top= 5):
         # Arbitrarily 5 for all from the Arpat paper.
         land = self.experiment.calculate_rpm_positions(gene_id, average=True)  # library size normalized disome peaks
-        normalized_peak_count = np.sum(land)  # to test whether normalized peak count > 5
-        mmc = np.mean(self.translatome.gene_assignments[gene_id])  # mean monosome count
+        
+        normalized_peak_count = np.sum(land > 0)  # to test whether normalized peak count > 5
+        mmc = self.translatome.calculate_rpm_genes(gene_id, average=True)  # mean monosome count
         if mmc < mmc_threshold or normalized_peak_count < normalized_peak_count_thr:
-            return np.nan
+            return np.array([])
         else:
             normalized_rpm = land / mmc
             return normalized_rpm.argsort()[-get_top:][::-1]  # Arbitrarily 5
 
-    def stalling_peaks_inecik_1(self, gene_id, percentile=90, window="hanning", window_len=25,
+    def stalling_peaks_inecik_1(self, gene_id, percentile=90, window="hanning", window_len=23,
                                 min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
         try:
-            assert self.aux_var_inecik_1
+            assert type(self.aux_var_inecik_1)
             assert self.aux_var_inecik_1_params == (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
-        except (NameError, AssertionError):
+        except (AttributeError, AssertionError):
             self.aux_var_inecik_1_params = (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
             self.aux_var_inecik_1 = [exp_rpm_s[find_peaks(exp_rpm_s)[0]] for exp_rpm_s in
                                      self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)]
@@ -940,16 +941,16 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
             peaks = find_peaks(exp_rpm_s)[0]
             peak_values = exp_rpm_s[peaks]
-            return peaks[np.log10(peak_values) > threshold]
+            return peaks[np.log10(peak_values) > threshold] - 1  # Added zero in the beginning
         except AssertionError:
             return np.array([])
 
-    def stalling_peaks_inecik_2(self, gene_id, percentile=90, window="hanning", window_len=25, wlen=290,
+    def stalling_peaks_inecik_2(self, gene_id, percentile=90, window="hanning", window_len=23, wlen=300,
                                 min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
         try:
-            assert self.aux_var_inecik_2
+            assert type(self.aux_var_inecik_2)
             assert self.aux_var_inecik_2_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
-        except (NameError, AssertionError):
+        except (AttributeError, AssertionError):
             self.aux_var_inecik_2_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
             self.aux_var_inecik_2 = list()
             for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
@@ -966,17 +967,17 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
             calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
             calc = calc_prominences[0] * calc_widths[0]
-            return peaks[np.log10(calc) > threshold]
+            return peaks[np.log10(calc) > threshold] - 1  # Added zero in the beginning
         except AssertionError:
             return np.array([])
 
-    def stalling_peaks_inecik_3(self, gene_id, probability=0.02, window="hanning", window_len=25, wlen=290,
+    def stalling_peaks_inecik_3(self, gene_id, probability=0.02, window="hanning", window_len=23, wlen=300,
                                 min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
 
         try:
-            assert self.aux_var_inecik_3
+            assert type(self.aux_var_inecik_3)
             assert self.aux_var_inecik_3_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
-        except (NameError, AssertionError):
+        except (AttributeError, AssertionError):
             self.aux_var_inecik_3_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
             calc_peak_width, calc_peak_prominence = list(), list()
             for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
@@ -1011,16 +1012,16 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             # probability_width
             peak_witdhs_probs = 1 - stats.fisk.cdf(calc_widths[0], *self.aux_var_inecik_3[0])
             bivariate_cumulative = peak_prominence_probs * peak_witdhs_probs
-            return peaks[bivariate_cumulative < probability]
+            return peaks[bivariate_cumulative < probability] - 1  # Added zero in the beginning
         except AssertionError:
             return np.array([])
 
-    def stalling_peaks_inecik_4(self, gene_id, percentile=90, window="hanning", window_len=25, wlen=290,
+    def stalling_peaks_inecik_4(self, gene_id, percentile=90, window="hanning", window_len=23, wlen=300,
                                 min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
         try:
-            assert self.aux_var_inecik_4
+            assert type(self.aux_var_inecik_4)
             assert self.aux_var_inecik_4_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
-        except (NameError, AssertionError):
+        except (AttributeError, AssertionError):
             self.aux_var_inecik_4_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
             self.aux_var_inecik_4 = list()
             for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
@@ -1034,7 +1035,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
             peaks, _ = find_peaks(exp_rpm_s)
             calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
-            return peaks[np.log10(calc_prominences[0]) > threshold]
+            return peaks[np.log10(calc_prominences[0]) > threshold] - 1  # Added zero in the beginning
         except AssertionError:
             return np.array([])
 
@@ -1045,7 +1046,8 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         assert exp_rpkm > min_rpkm_sixtymers and tra_rpkm > min_rpkm_translatome
         assert len(exp_rpm_bs) > window_len
         rpm_gene = self.translatome.calculate_rpm_genes(gene_id)
-        return smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene
+        exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene) + [0]
+        return np.array(exp_rpm_s)
 
     def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
         for gene_id in self.gene_list:
@@ -1058,10 +1060,10 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         total_exp = self.experiment.calculate_rpkm_genes(gene_id)
         total_tra = self.translatome.calculate_rpkm_genes(gene_id)
         rpm_tra = self.translatome.calculate_rpm_genes(gene_id)
-        arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=25, window="hanning") / rpm_tra
+        arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / rpm_tra
         peaks = function(gene_id, *args, **kwargs)
         # Plot
-        fig, ax = plt.subplots(1, 1, figsize=(7, 2))
+        fig, ax = plt.subplots(1, 1, figsize=(14, 4))
         fig.suptitle(gene_id, y=1.1, fontweight="bold")
         ax.plot(arr, alpha=1, color="salmon")
         ax.scatter(peaks, [arr[p] for p in peaks], color="black", alpha=1, s=25)
@@ -1072,14 +1074,8 @@ class RiboSeqSixtymers(RiboSeqExperiment):
                       transform=ax.transAxes, verticalalignment='top', horizontalalignment="right")
         ax.axes.get_yaxis().set_visible(False)
         ax.tick_params(labelsize=6)
-        plt.tight_layout()
-        plt.show()
+        return arr, peaks
 
-# TODO: aynı sonuçları mı veriyor?
-#   window_len-1 doğru mu
-#   arpat doğru mu
-#   Array'in başına ve sonuna 0 ekle çünkü baş ve sondaki pikleri algılamıyor
-#   jupyter'daki notlar?
 
 class RiboSeqSelective(RiboSeqExperiment):
 
@@ -1457,8 +1453,9 @@ def gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id, make
     transcript_list = gene_info_dictionary[gene_id].transcripts["ensembl_transcript_id"].to_list()
     cds_all_ranges = [protein_genome_instance.db[transcript_id][0] for transcript_id in transcript_list]
     cds_all_ranges = reduce_range_list([j for i in cds_all_ranges for j in i])  # it sorts
-    strand = -1 if protein_genome_instance.db[transcript_list[0]][4] == "-" else 1  # all tx are the same
+    strand = -1 if protein_genome_instance.db[transcript_list[0]][4] == "-" else 1  # all tx are always the same
     # Ters olanları ters sırada veriyor!!!
+    # ProteinGenome zaten düzeltiyor transcript'i eğer -1'deyse ama reduce_range_list sırayı bozuyor.
     if strand == -1:
         cds_all_ranges = [[j, i] for i, j in reversed(cds_all_ranges)]  # reverse if at '-'
     if not make_array:
@@ -1471,6 +1468,7 @@ def best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, 
     best_transcript = gene_info_dictionary[gene_id].transcripts.iloc[0][0]  # At least 1 transcript exists
     cds_ranges = protein_genome_instance.db[best_transcript][0]
     # Ters olanları ters sırada veriyor!!!
+    # ProteinGenome zaten düzeltiyor transcript'i eğer -1'deyse
     if not make_array:
         return cds_ranges
     else:
@@ -1478,11 +1476,11 @@ def best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id, 
         return np.concatenate([np.arange(i, j + strand, strand) for i, j in cds_ranges])
 
 
-def ensembl_range_sum(ranges):
+def ensembl_range_sum(ranges: list) -> int:
     """
     The function is to calculate the total CDS/exon length of a transcript.
-    :param ranges: List of ranges. Obtained by coding_sequence_position_ranges or exon_intervals method of tx object
-    :return: Integer. Total length of the CDS/exon
+    :param ranges: Nested list. Obtained by coding_sequence_position_ranges or exon_intervals method of tx object
+    :return: Total length of the CDS/exon
     """
     total = 0  # Initialize
     for i, j in ranges:  # For each CDS/exon of a transcript, get start and end positions
@@ -1491,32 +1489,16 @@ def ensembl_range_sum(ranges):
     return total
 
 
+def array_to_ranges(i): # set or list
+    for a, b in itertools.groupby(enumerate(i), lambda pair: pair[1] - pair[0]):
+        b = list(b)
+        yield b[0][1], b[-1][1]
+
+
 def reduce_range_list(ranges):
-    """
-    Best way to return minimum number of ranges from a collection of ranges
-    :param ranges: List of ranges (nested list), or list of tuples
-    :return: List of lists
-    """
-    # Sorting the list based on the lower limit, and then based on size as tie breaker
-    # Note: We need the bigger ranges to come before the smaller ranges
-    rng = sorted(ranges, key=lambda pair: (pair[0], - pair[1]))
-    reduced = []  # New set of ranges are stored here
-    parent = rng[0]  # Use a parent range to decide if a range is inside other ranges
-    # This will for sure be part of the solution, because it is the largest, leftmost range
-    reduced.append(rng[0])  # Add it to the reduced list
-
-    for x in rng:  # for each entry in ranges
-        if parent[0] <= x[0] and x[1] <= parent[1]:  # This range is completely within another range
-            continue  # Ignore it
-        elif x[0] <= parent[1]:  # This range is partially inside the parent range
-            parent = [parent[0], x[1]]  # Set the parent to cover this two range
-        else:  # This range is completely outside the parent range
-            parent = x
-        # If the range is completely or partially outside other ranges...
-        # Place it here to avoid duplicate code
-        reduced.append(x)
-
-    return reduced  # Return the solution
+    rgs = sorted(ranges, key=lambda pair: (pair[0], - pair[1]))
+    arr = set([k for i, j in rgs for k in range(i, j + 1)])
+    return list(array_to_ranges(arr))
 
 
 def save_joblib(object_to_dump, absolute_output_path, verbose):
