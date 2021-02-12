@@ -30,10 +30,11 @@ I = Infrastructre(temp_repo_dir,
                   riboseq_assign_at=-15,
                   riboseq_assign_to="best_transcript",
                   ensembl_release=102,
-                  include_gene3d=True,
+                  #include_gene3d=True,
                   verbose=True,
-                  serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
-                  sixtymers=[spt, sps],
-                  coco=[coco_m, coco_d])
+                  #serb=[["selectiveErb", erb_total, erb_serb], ["selectiveNac", nac_total, nac_serb]],
+                  #sixtymers=[spt, sps],
+                  #coco=[coco_m, coco_d]
+                  )
 
 
