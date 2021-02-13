@@ -1666,7 +1666,7 @@ class Col:
     W = '\033[93m'  # Warning
     F = '\033[91m'  # Fail
     E = '\033[0m'  # End
-    O = '\033[1m'  # Bold
+    D = '\033[1m'  # Bold
     U = '\033[4m'  # Underline
 
 
