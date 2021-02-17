@@ -35,13 +35,14 @@ script_path_infrastructure = __file__
 
 class Infrastructre:
 
-    def __init__(self, temp_repo_dir, exclude_genes=list(), ensembl_release=102,
+    def __init__(self, temp_repo_dir, organism="homo_sapiens", exclude_genes=list(), ensembl_release=102,
                  sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-15,
                  include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
         self.exclude_genes = exclude_genes
         self.ensembl_release = ensembl_release
+        self.organism = organism
         self.verbose = verbose
 
         self.script_path_infrastructure = script_path_infrastructure
@@ -49,15 +50,18 @@ class Infrastructre:
         self.script_path_gene_info_names_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_names.R"))
         self.script_path_gene_info_uniprot_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene_info_uniprot.R"))
 
-        gene_info_database = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_db, self.ensembl_release)
-        gene_info_names = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_names_db, self.ensembl_release)
-        gene_info_uniprot = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_uniprot_db, self.ensembl_release)
+        gene_info_database = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_db,
+                                             self.ensembl_release, self.organism)
+        gene_info_names = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_names_db,
+                                          self.ensembl_release, self.organism)
+        gene_info_uniprot = biomart_mapping(self.temp_repo_dir, self.script_path_gene_info_uniprot_db,
+                                            self.ensembl_release, self.organism)
 
         gene_info_database = gene_info_database[gene_info_database["transcript_biotype"] == "protein_coding"]
         self.gene_list = sorted(np.unique(gene_info_database["ensembl_gene_id"].dropna()))
         self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot, verbose=self.verbose)
 
-        ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release)
+        ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release, self.organism)
 
         transcript_list = sorted(np.unique(gene_info_database["ensembl_transcript_id"].dropna()))
         self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero, verbose=self.verbose)
@@ -93,7 +97,8 @@ class Infrastructre:
 
         if include_gene3d:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
-            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome, ero, verbose=self.verbose)
+            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome,
+                                                 ero, organism="homo_sapiens", verbose=self.verbose)
 
 
 
@@ -517,7 +522,7 @@ class EnsemblDomain:
 
     def __init__(self, temp_repo_dir: str, rscript: str, protein_genome_instance: ProteinGenome,
                  ensembl_release_object: pyensembl.Genome, ensembl_release: int = 102,
-                 verbose: bool = True, recalculate: bool = False):
+                 organism:str = "homo_sapiens", verbose: bool = True, recalculate: bool = False):
         """
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param rscript: Absolute path of R-Script, which fetches data from Ensembl. Check one of the script (e.g.
@@ -525,6 +530,7 @@ class EnsemblDomain:
         :param protein_genome_instance: An instance of ProteinGenome class
         :param ensembl_release_object: Output of ensembl_release_object_creator()
         :param ensembl_release: Ensembl release version
+        :param organism: Organism of interest to get the information from.
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :param recalculate: If True, it will calculate anyway.
         """
@@ -533,6 +539,7 @@ class EnsemblDomain:
         self.base_name = os.path.split(os.path.splitext(self.rscript)[0])[1]
         self.output_file_name = os.path.join(self.temp_repo_dir, f"{self.base_name}.joblib")
         self.ensembl_release = ensembl_release
+        self.organism = organism
         self.verbose = verbose
         self.recalculate = recalculate
 
@@ -559,7 +566,8 @@ class EnsemblDomain:
             self.columns = loaded_content.columns
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
             print_verbose(verbose, f"{Col.H}Ensembl domains are being calculated: {self.base_name}{Col.E}")
-            self.df = biomart_mapping(self.temp_repo_dir, self.rscript, self.ensembl_release)  # Get the annotations
+            self.df = biomart_mapping(self.temp_repo_dir, self.rscript,
+                                      self.ensembl_release, self.organism)  # Get the annotations
             self.columns = self.df.columns
             self.convert2genome(protein_genome_instance, ensembl_release_object)  # Get genome coordinates as well.
             # Save the resulting data frame into a joblib file to load without calculating again in next runs.
@@ -805,7 +813,7 @@ class RiboSeqAssignment:
 
             for ind, e in enumerate(sam_iterator):  # Iterate through the entries
                 # Print out the current process to stdout as a progress bar.
-                if verbose and (ind % 1000 == 0 or ind == iteration - 1):  # Print the progress bar in meaningful intervals
+                if verbose and (ind % 1000 == 0 or ind == iteration - 1):  # Print it in meaningful intervals
                     progress_bar(ind, iteration - 1, verbose=verbose)
                 # This assertion is to make sure below if-else statement works perfectly well.
                 assert sum(e.get_cigar_stats()[1][5:]) == 0, "Make sure cigar string composed of D, I, M, N, S only!"
@@ -1464,51 +1472,93 @@ class ConservationGerp:
     pass
 
 
-def biomart_mapping(temp_repo_dir, rscript, release=102):
-
+def biomart_mapping(temp_repo_dir, rscript, release, organism):  # organism name should be formatted identical to Organism class
     base_name = os.path.split(os.path.splitext(rscript)[0])[1]
     data_path = os.path.join(temp_repo_dir, f"{base_name}.txt")
-
+    dataset_map = {"homo_sapiens": "hsapiens_gene_ensembl",
+                   "mus_musculus": "mmusculus_gene_ensembl"}
     if not os.access(data_path, os.R_OK) or not os.path.isfile(data_path):
-        print(f"{Col.H}BiomaRt script is being run: {base_name}.{Col.E}")
+        print(f"{Col.H}BiomaRt script is being run for {organism}: {base_name}.{Col.E}")
         r_installation = "RScript" if sys.platform == "darwin" else "Rscript"
-        spr = subprocess.run(f"cd {temp_repo_dir}; {which(r_installation)} {rscript} {release} {data_path}", shell=True)
+        spr = subprocess.run(f"cd {temp_repo_dir}; {which(r_installation)} {rscript} "
+                             f"{release} {dataset_map[organism]} {data_path}", shell=True)
         assert spr.returncode == 0, f"Error: {rscript}"
 
     return pd.read_table(data_path)
 
 
-def ensembl_release_object_creator(temp_repo_dir, release=102):
+# todo: sync this class with pipeline for your conveninence:
+class OrganismDatabase:
+    ID_MAP = {"homo_sapiens": 9606, "mus_musculus": 10090}
 
-    def download_and_or_return(url_with_gz):
-        basename_with_gz = os.path.split(url_with_gz)[1]
-        basename_without_gz = os.path.splitext(os.path.split(url_with_gz)[1])[0]
-        downloaded_file = os.path.join(temp_repo_dir, basename_with_gz)  # Downloaded gz path
-        output_path = os.path.join(temp_repo_dir, basename_without_gz)  # Output path
+    def __init__(self, organism, ensembl_release, temp_repo_dir):
+        assert organism in ["homo_sapiens", "mus_musculus"]
+        # todo: also add "homo_sapiens_refseq"
 
-        if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path):  # Check if it already exist
-            print(f"Downloading: {basename_with_gz}")
-            spr1 = subprocess.run(f"cd {temp_repo_dir}; curl -L -R -O {url_with_gz}", shell=True)  # Download the file
-            subprocess.run(f"cd {temp_repo_dir}; gzip -d -f {downloaded_file}", shell=True)  # Uncompress the file
-            assert spr1.returncode == 0, f"Could not download: {url_with_gz}"
+        self.ensembl_release = ensembl_release
+        self.organism = organism
+        self.organism_id = OrganismDatabase.ID_MAP[self.organism]
+        self.temp_repo_dir = temp_repo_dir
 
-        return output_path
+        base_temp = f"ftp://ftp.ensembl.org/pub/release-{ensembl_release}"
 
-    gtf_url = f"ftp://ftp.ensembl.org/pub/release-{release}/gtf/homo_sapiens/" \
-              f"Homo_sapiens.GRCh38.{release}.chr_patch_hapl_scaff.gtf.gz"
-    transcript_fasta_url = f"ftp://ftp.ensembl.org/pub/release-{release}/fasta/homo_sapiens/" \
-                           f"cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz"
-    protein_fasta_url = f"ftp://ftp.ensembl.org/pub/release-{release}/fasta/homo_sapiens/" \
-                        f"pep/Homo_sapiens.GRCh38.pep.all.fa.gz"
+        if self.organism == "homo_sapiens":
+            # Genome GTF
+            gtf_temp = f"gtf/homo_sapiens/Homo_sapiens.GRCh38.{self.ensembl_release}.chr_patch_hapl_scaff.gtf.gz"
+            self.gtf = os.path.join(base_temp, gtf_temp)
+            # Genome GFF3
+            gff3_temp = f"gff3/homo_sapiens/Homo_sapiens.GRCh38.{self.ensembl_release}.chr_patch_hapl_scaff.gff3.gz"
+            self.gff3 = os.path.join(base_temp, gff3_temp)
+            # Genome DNA fasta
+            dna_temp = "fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz"
+            self.dna = os.path.join(base_temp, dna_temp)
+            # Transcriptome DNA fasta
+            cdna_temp = "fasta/homo_sapiens/cdna/Homo_sapiens.GRCh38.cdna.all.fa.gz"
+            self.cdna = os.path.join(base_temp, cdna_temp)
+            # Protein Fasta
+            pep_temp = "fasta/homo_sapiens/pep/Homo_sapiens.GRCh38.pep.all.fa.gz"
+            self.pep = os.path.join(base_temp, pep_temp)
 
-    gtf_path = download_and_or_return(gtf_url)
-    transcript_fasta_path = download_and_or_return(transcript_fasta_url)
-    protein_fasta_path = download_and_or_return(protein_fasta_url)
+        elif self.organism == "mus_musculus":
+            # Genome GTF
+            gtf_temp = f"gtf/mus_musculus/Mus_musculus.GRCm38.{self.ensembl_release}.chr_patch_hapl_scaff.gtf.gz"
+            self.gtf = os.path.join(base_temp, gtf_temp)
+            # Genome GFF3
+            gff3_temp = f"gff3/mus_musculus/Mus_musculus.GRCm38.{self.ensembl_release}.chr_patch_hapl_scaff.gff3.gz"
+            self.gff3 = os.path.join(base_temp, gff3_temp)
+            # Genome DNA fasta
+            dna_temp = "fasta/mus_musculus/dna/Mus_musculus.GRCm38.dna.primary_assembly.fa.gz"
+            self.dna = os.path.join(base_temp, dna_temp)
+            # Transcriptome DNA fasta
+            cdna_temp = "fasta/mus_musculus/cdna/Mus_musculus.GRCm38.cdna.all.fa.gz"
+            self.cdna = os.path.join(base_temp, cdna_temp)
+            # Protein Fasta
+            pep_temp = "fasta/mus_musculus/pep/Mus_musculus.GRCm38.pep.all.fa.gz"
+            self.pep = os.path.join(base_temp, pep_temp)
+
+    def get_db(self, db):
+        db_url = eval(f"self.{db}")
+        output_path_compressed = os.path.join(self.temp_repo_dir, os.path.basename(db_url))
+        output_path_uncompressed = os.path.splitext(output_path_compressed)[0]
+        if not os.access(output_path_uncompressed, os.R_OK) or not os.path.isfile(output_path_uncompressed):
+            print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
+            if not os.access(output_path_compressed, os.R_OK) or not os.path.isfile(output_path_compressed):
+                subprocess.run(f"cd {self.temp_repo_dir}; curl -L -O --silent {db_url}", shell=True)
+            subprocess.run(f"cd {self.temp_repo_dir}; gzip -d -q {output_path_compressed}", shell=True)
+        return output_path_uncompressed
+
+
+def ensembl_release_object_creator(temp_repo_dir, release, organism):
+
+    organism_instance = OrganismDatabase(organism, release, temp_repo_dir)
+    gtf_path = organism_instance.get_db("gtf")
+    transcript_fasta_path = organism_instance.get_db("cdna")
+    protein_fasta_path = organism_instance.get_db("pep")
 
     ero = pyensembl.Genome(
-        reference_name="GRCh38",
+        reference_name=f"{organism}_{release}",
         annotation_version=release,
-        annotation_name=f"Homo_sapiens.GRCh38.{release}",
+        annotation_name=f"{organism}_{release}",
         gtf_path_or_url=gtf_path,
         transcript_fasta_paths_or_urls=[transcript_fasta_path],
         protein_fasta_paths_or_urls=[protein_fasta_path],
