@@ -35,12 +35,12 @@ script_path_infrastructure = __file__
 
 class Infrastructre:
 
-    def __init__(self, temp_repo_dir, organism="homo_sapiens", exclude_genes=list(), ensembl_release=102,
+    def __init__(self, temp_repo_dir, organism: str, exclude_genes: list = None, ensembl_release=102,
                  sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-15,
                  include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
-        self.exclude_genes = exclude_genes
+        self.exclude_genes = [] if not exclude_genes else exclude_genes
         self.ensembl_release = ensembl_release
         self.organism = organism
         self.verbose = verbose
@@ -71,36 +71,13 @@ class Infrastructre:
         self.riboseq_assign_to = riboseq_assign_to
         self.riboseq_assign_at = riboseq_assign_at
 
-        # Should be first to calculate, since multiprocessing is quite memory inefficient.
-        if coco:  # [monosome_sam, disome_sam]
-            self.riboseq_coco = RiboSeqCoco(self.temp_repo_dir, coco[0], coco[1], self.riboseq_assign_at,
-                                            self.riboseq_assign_to, self.protein_genome, self.gene_info,
-                                            exclude_genes=self.exclude_genes, verbose=self.verbose)
-        else:
-            self.riboseq_coco = None
-
-        if sixtymers:  # [translatome_sam, sixtymer_sam]
-            self.riboseq_sixtymers = RiboSeqSixtymers(self.temp_repo_dir, sixtymers[0], sixtymers[1], self.riboseq_assign_at,
-                                                      self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=self.verbose)
-        else:
-            self.riboseq_sixtymers = None
-
-        if serb:  # [[str:name, str:translatome_sam, str:experiment_sam], [...]]
-            self.riboseq_serb = dict()
-            for serb0, serb1, serb2 in serb:
-                self.riboseq_serb[serb0] = RiboSeqSelective(self.temp_repo_dir, serb1, serb2, serb0, self.riboseq_assign_at,
-                                                             self.riboseq_assign_to, self.protein_genome, self.gene_info, exclude_genes=self.exclude_genes, verbose=self.verbose)
-            else:
-                self.riboseq_serb = None
-
         # Integrate protein annotations
 
         if include_gene3d:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
             self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome,
-                                                 ero, organism="homo_sapiens", verbose=self.verbose)
-
-
+                                                 ero, ensembl_release=self.ensembl_release,
+                                                 organism=self.organism, verbose=self.verbose)
 
     def create_gene_matrix(self, gene_id):
         pass
@@ -168,7 +145,7 @@ class Gene:
 
     def __init__(self, one_gene_df: pd.DataFrame, one_gene_names: pd.DataFrame, one_gene_uniprot: pd.DataFrame):
         """
-        'A=k[k["ensembl_gene_id"] == gene_id]' where k is biomart_mapping() output.
+        Init function. 'A=k[k["ensembl_gene_id"] == gene_id]' where k is biomart_mapping() output.
         See gene_class_dict_generate() for its implementation.
         :param one_gene_df: 'A', where biomart_mapping was run with gene_info_database.R
         :param one_gene_names: 'A', where biomart_mapping was run with gene_info_names.R
@@ -215,11 +192,16 @@ class Gene:
         transcripts["transcript_appris"] = transcripts["transcript_appris"].replace(
             ["alternative1", "alternative2"], ["renamed_alternative1", "renamed_alternative2"])
         # Check there is only one MANE select for a gene; because if not, the sorting will fail.
-        assert len(np.unique(transcripts["transcript_mane_select"].dropna())) <= 1
+        if "transcript_mane_select" in transcripts.columns:  # only human contains MANE annotation
+            assert len(np.unique(transcripts["transcript_mane_select"].dropna())) <= 1
         # Based on my research, sorting the transcripts by the following order will always give the best possible
         # transcript in terms of functional relevance and amount of evidence supporting its presence.
-        transcripts.sort_values(by=["transcript_mane_select", "transcript_appris", "transcript_gencode_basic",
-                                    "transcript_tsl", "external_transcript_name"], inplace=True, ignore_index=True)
+        if "transcript_mane_select" in transcripts.columns:  # only human contains MANE annotation
+            transcripts.sort_values(by=["transcript_mane_select", "transcript_appris", "transcript_gencode_basic",
+                                        "transcript_tsl", "external_transcript_name"], inplace=True, ignore_index=True)
+        else:
+            transcripts.sort_values(by=["transcript_appris", "transcript_gencode_basic",
+                                        "transcript_tsl", "external_transcript_name"], inplace=True, ignore_index=True)
         # See https://m.ensembl.org/info/genome/genebuild/transcript_quality_tags.html for more information
         return transcripts  # Return the sorted and narrowed dataframe
 
@@ -237,6 +219,7 @@ class ProteinGenome:
     def __init__(self, temp_repo_dir: str, transcript_list: list, ensembl_release_object: pyensembl.Genome,
                  verbose: bool = True, recalculate: bool = False):
         """
+        Init function.
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param transcript_list: List of gene IDs, for which to create the dictionary. Ideally, it should be sorted.
         :param ensembl_release_object: Output of ensembl_release_object_creator()
@@ -521,9 +504,10 @@ class EnsemblDomain:
     # todo: The class can return all domains of a transcript
 
     def __init__(self, temp_repo_dir: str, rscript: str, protein_genome_instance: ProteinGenome,
-                 ensembl_release_object: pyensembl.Genome, ensembl_release: int = 102,
-                 organism:str = "homo_sapiens", verbose: bool = True, recalculate: bool = False):
+                 ensembl_release_object: pyensembl.Genome, ensembl_release: int,
+                 organism: str, verbose: bool = True, recalculate: bool = False):
         """
+        Init function.
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param rscript: Absolute path of R-Script, which fetches data from Ensembl. Check one of the script (e.g.
         gene3d.R) as a reference to properly use this class.
@@ -617,8 +601,9 @@ class RiboSeqAssignment:
 
     def __init__(self, sam_paths: list, temp_repo_dir: str, riboseq_assign_at: int, riboseq_assign_to: str,
                  riboseq_group: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 verbose: bool = True, recalculate: bool = False):
+                 footprint_len: Union[int, list] = None, verbose: bool = True, recalculate: bool = False):
         """
+        Init function.
         :param sam_paths: List of absolute path of SAM files, which are replicates of each other.
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at. '0' denotes to
@@ -630,6 +615,7 @@ class RiboSeqAssignment:
         "best_transcript" but not for "gene" for now.
         :param riboseq_group: Unique string to identify the RiboSeq experiment. e.g "cocoassembly_monosome"
         :param protein_genome_instance: An instance of ProteinGenome class
+        :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
         :param gene_info_dictionary: Output of gene_class_dict_generate() function
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :param recalculate: If True, it will calculate anyway.
@@ -645,6 +631,7 @@ class RiboSeqAssignment:
         self.verbose = verbose  # Save the whether 'verbose' activated or not
         self.riboseq_group = riboseq_group  # Define riboseq_group variable for a function.
         self.recalculate = recalculate  # Save the whether 'recalculate' activated or not.
+        self.footprint_len = footprint_len
 
         try:
             # Check if there is already a calculated object saved before.
@@ -664,6 +651,7 @@ class RiboSeqAssignment:
                 os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
                 self.riboseq_assign_at == loaded_content.riboseq_assign_at,
                 self.riboseq_assign_to == loaded_content.riboseq_assign_to,
+                self.footprint_len == loaded_content.footprint_len,
                 len(self.gene_list) == len(loaded_content.gene_list),  # There are the same amount of gene.
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),  # They are correctly sorted.
             ])
@@ -679,7 +667,8 @@ class RiboSeqAssignment:
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
             print_verbose(verbose, f"{Col.H}Gene assignments are being calculated: {self.riboseq_group}{Col.E}")
             self.gene_assignments = self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary,
-                                                                    footprint_len=None, verbose=self.verbose)
+                                                                    footprint_len=self.footprint_len,
+                                                                    verbose=self.verbose)
             # Calculate gene lengths as well, which can be used in different applications.
             self.gene_lengths = {i: int(self.gene_assignments[i].shape[1]) for i in self.gene_list}
             self.exclude_genes_calculate_stats(self.exclude_gene_list)  # Exclude genes, calculate RPM, RPKM etc.
@@ -707,7 +696,7 @@ class RiboSeqAssignment:
         self.total_assigned = np.nansum(np.array(list(self.total_assigned_gene.values())), axis=0)
 
     def calculate_gene_assignments(self, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                                   footprint_len: int = None, verbose: bool = True):
+                                   footprint_len: Union[int, list] = None, verbose: bool = True):
         """
         Main method to calculate the assignments, which orchestrates the gene assignment by calling class methods and
         linking the outputs to determine the gene assignment.
@@ -731,7 +720,7 @@ class RiboSeqAssignment:
         else:  # For now, there is only two methods for CDS selection.
             raise AssertionError("Selection variable must be either 'gene' or 'best_transcript'.")
         # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
-        print_verbose(verbose, f"{Col.H}Footprint are being assigned to genomic coordinates.{Col.E}")
+        print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
         footprint_genome_assignment_list = [self.footprint_assignment(sam_path, assignment=self.riboseq_assign_at,
                                                                       footprint_len=footprint_len, verbose=verbose)
                                             for sam_path in self.sam_paths]
@@ -740,10 +729,9 @@ class RiboSeqAssignment:
         return self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
                                               positions_gene, verbose=verbose)
 
-    def gene_assignments_for_list_of_lengths(self, x, y, z):
-        return [self.calculate_gene_assignments(protein_genome_instance=y,
-                                                gene_info_dictionary=z, footprint_len=i,
-                                                verbose=False) for i in x]
+    def _gene_assignments_for_list_of_lengths(self, x, y, z):
+        return [self.calculate_gene_assignments(protein_genome_instance=y, gene_info_dictionary=z,
+                                                footprint_len=i, verbose=False) for i in x]
 
     def assign_for_defined_footprint_lengths(self, footprint_lengths, n_core,
                                              protein_genome_instance, gene_info_dictionary):
@@ -759,7 +747,7 @@ class RiboSeqAssignment:
         :return:
         """
 
-        ga_lol = partial(self.gene_assignments_for_list_of_lengths, y=protein_genome_instance, z=gene_info_dictionary)
+        ga_lol = partial(self._gene_assignments_for_list_of_lengths, y=protein_genome_instance, z=gene_info_dictionary)
         chunk_size = math.ceil(len(footprint_lengths) / n_core)
         gene_list_chunks = [footprint_lengths[i: i + chunk_size] for i in range(0, len(footprint_lengths), chunk_size)]
         executor = multiprocessing.Pool(len(gene_list_chunks))
@@ -785,7 +773,8 @@ class RiboSeqAssignment:
         return chromosomes  # Return the resulting filled dictionary
 
     @staticmethod
-    def footprint_assignment(sam_path: str, assignment: int, footprint_len: int = None, verbose: bool = False) -> dict:
+    def footprint_assignment(sam_path: str, assignment: int, verbose: bool = False,
+                             footprint_len: Union[int, list] = None) -> dict:
         """
         Assigns the footprints into chromosomes and then into genomic positions. However, assigning to the genes are
         not a part of this method.
@@ -835,9 +824,13 @@ class RiboSeqAssignment:
                     reference_positions = e.get_reference_positions()  # Get genomic coordinates including 'D'
 
                 # If only one footprint length is of interest.
-                if footprint_len and len(reference_positions) != footprint_len:
+                if footprint_len and isinstance(footprint_len, int) and len(reference_positions) != footprint_len:
                     counter_footprint_length += 1  # Count to report at the end.
                     continue  # Skip this footprint.
+                # If a list of footprint length is of interest.
+                if footprint_len and isinstance(footprint_len, list) and len(reference_positions) not in footprint_len:
+                    counter_footprint_length += 1
+                    continue
 
                 try:
                     if e.is_reverse:  # If reverse use the assigned position calculated in the beginning of the method.
@@ -963,8 +956,10 @@ class RiboSeqExperiment:
 
     """
 
-    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
+    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str,
+                 assignment: int, selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+                 exclude_genes: list = None, verbose=True, recalculate=False):
 
         self.temp_repo_dir = temp_repo_dir
         self.sam_paths_translatome = sam_paths_translatome
@@ -972,19 +967,21 @@ class RiboSeqExperiment:
         self.name_experiment = name_experiment
         self.riboseq_assign_to = selection
         self.riboseq_assign_at = assignment
-        self.exclude_genes = exclude_genes
+        self.exclude_genes = [] if not exclude_genes else exclude_genes
         self.verbose = verbose
         self.recalculate = recalculate
         self.gene_list = sorted(gene_info_dictionary.keys())
 
         self.translatome = RiboSeqAssignment(self.sam_paths_translatome, self.temp_repo_dir, self.riboseq_assign_at,
                                              self.riboseq_assign_to, name_experiment + "_translatome",
-                                             protein_genome_instance, gene_info_dictionary)
+                                             protein_genome_instance, gene_info_dictionary,
+                                             footprint_len=footprint_len_translatome)
         self.experiment = RiboSeqAssignment(self.sam_paths_experiment, self.temp_repo_dir, self.riboseq_assign_at,
                                             self.riboseq_assign_to, name_experiment + "_experiment",
-                                            protein_genome_instance, gene_info_dictionary)
+                                            protein_genome_instance, gene_info_dictionary,
+                                            footprint_len=footprint_len_experiment)
 
-        if exclude_genes:
+        if self.exclude_genes:
             # Bu sayede kaydedilen assignment dosyaları tekrar tekrar kullanılabilir oluyor
             self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
@@ -1000,10 +997,14 @@ class RiboSeqExperiment:
 
 class RiboSeqSixtymers(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, assignment: int,  # name_experiment: str,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
-        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, "sixtymers", assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+                 exclude_genes: list = None, verbose: bool = True, recalculate: bool = False):
+        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
+                         selection, protein_genome_instance, gene_info_dictionary,
+                         footprint_len_experiment, footprint_len_translatome,
+                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
     def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top= 5):
         # Arbitrarily 5 for all from the Arpat paper.
@@ -1172,9 +1173,13 @@ class RiboSeqSixtymers(RiboSeqExperiment):
 class RiboSeqSelective(RiboSeqExperiment):
 
     def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+                 exclude_genes=None, verbose=True, recalculate=False):
         super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+                         selection, protein_genome_instance, gene_info_dictionary,
+                         footprint_len_experiment, footprint_len_translatome,
+                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
     def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
         pass
@@ -1182,10 +1187,14 @@ class RiboSeqSelective(RiboSeqExperiment):
 
 class RiboSeqCoco(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict, exclude_genes=[], verbose=True, recalculate=False):
-        super().__init__(temp_repo_dir, sam_paths_monosome, sam_paths_disome, "cocoassembly", assignment,
-        selection, protein_genome_instance, gene_info_dictionary, exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+    def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, name_experiment: str, assignment: int,
+                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+                 exclude_genes=None, verbose=True, recalculate=False):
+        super().__init__(temp_repo_dir, sam_paths_monosome, sam_paths_disome, name_experiment, assignment,
+                         selection, protein_genome_instance, gene_info_dictionary,
+                         footprint_len_experiment, footprint_len_translatome,
+                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
 
         self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_on_{self.riboseq_assign_to}_fitting_calculations.joblib")
         self.n_core = multiprocessing.cpu_count()
