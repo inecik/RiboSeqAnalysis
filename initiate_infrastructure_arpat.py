@@ -13,16 +13,15 @@ disomes = [os.path.join(data_repo_dir, i) for i in ["SRR9715828.sam", "SRR971582
 monosomes = [os.path.join(data_repo_dir, i) for i in ["SRR1930189.sam", "SRR1930188.sam"]]
 
 I = Infrastructre(temp_repo_dir,
-                  riboseq_assign_at=-15,
-                  riboseq_assign_to="best_transcript",
                   ensembl_release=102,
                   organism="mus_musculus",
                   include_gene3d=True,
                   verbose=True)
 
 I.riboseq_sixtymers = RiboSeqSixtymers(I.temp_repo_dir, monosomes, disomes, "sixtymers",
-                                       I.riboseq_assign_at, I.riboseq_assign_to,
-                                       I.protein_genome, I.gene_info,
+                                       selection="best_transcript", assignment=-15,
+                                       protein_genome_instance=I.protein_genome,
+                                       gene_info_dictionary=I.gene_info,
                                        exclude_genes=I.exclude_genes, verbose=I.verbose,
                                        footprint_len_experiment=list(range(45,71)),  # From paper
                                        footprint_len_translatome=list(range(26,36))  # From paper

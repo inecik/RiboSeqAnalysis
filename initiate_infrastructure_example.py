@@ -25,8 +25,6 @@ exclude_genes = ["ENSG00000160789"]
 
 I = Infrastructre(temp_repo_dir,
                   exclude_genes=exclude_genes,
-                  riboseq_assign_at=-15,
-                  riboseq_assign_to="best_transcript",
                   ensembl_release=102,
                   organism="homo_sapiens",
                   include_gene3d=True,
@@ -34,22 +32,26 @@ I = Infrastructre(temp_repo_dir,
 
 # Should be first to calculate, since multiprocessing is quite memory inefficient.
 I.riboseq_coco = RiboSeqCoco(I.temp_repo_dir, coco_m, coco_d, "cocoassembly",
-                             I.riboseq_assign_at, I.riboseq_assign_to,
-                             I.protein_genome, I.gene_info,
+                             selection="best_transcript", assignment=-15,
+                             protein_genome_instance=I.protein_genome,
+                             gene_info_dictionary=I.gene_info,
                              exclude_genes=I.exclude_genes, verbose=I.verbose)
 
-I.riboseq_sixtymers = RiboSeqSixtymers(I.temp_repo_dir, sps, spt, "sixtymers",
-                                       I.riboseq_assign_at, I.riboseq_assign_to,
-                                       I.protein_genome, I.gene_info,
+I.riboseq_sixtymers = RiboSeqSixtymers(I.temp_repo_dir, spt, sps, "sixtymers",
+                                       selection="best_transcript", assignment=-15,
+                                       protein_genome_instance=I.protein_genome,
+                                       gene_info_dictionary=I.gene_info,
                                        exclude_genes=I.exclude_genes, verbose=I.verbose)
 
 I.riboseq_selErb = RiboSeqSelective(I.temp_repo_dir, erb_total, erb_serb, "selectiveErb",
-                                    I.riboseq_assign_at, I.riboseq_assign_to,
-                                    I.protein_genome, I.gene_info,
+                                    selection="best_transcript", assignment=-15,
+                                    protein_genome_instance=I.protein_genome,
+                                    gene_info_dictionary=I.gene_info,
                                     exclude_genes=I.exclude_genes, verbose=I.verbose)
 
 I.riboseq_selNac = RiboSeqSelective(I.temp_repo_dir, nac_total, nac_serb, "selectiveErb",
-                                    I.riboseq_assign_at, I.riboseq_assign_to,
-                                    I.protein_genome, I.gene_info,
+                                    selection="best_transcript", assignment=-15,
+                                    protein_genome_instance=I.protein_genome,
+                                    gene_info_dictionary=I.gene_info,
                                     exclude_genes=I.exclude_genes, verbose=I.verbose)
 

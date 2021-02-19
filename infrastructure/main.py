@@ -36,7 +36,6 @@ script_path_infrastructure = __file__
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, organism: str, exclude_genes: list = None, ensembl_release=102,
-                 sixtymers=None, serb=None, coco=None, riboseq_assign_to="best_transcript", riboseq_assign_at=-15,
                  include_gene3d=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
@@ -66,18 +65,12 @@ class Infrastructre:
         transcript_list = sorted(np.unique(gene_info_database["ensembl_transcript_id"].dropna()))
         self.protein_genome = ProteinGenome(self.temp_repo_dir, transcript_list, ero, verbose=self.verbose)
 
-        # Integrate RiboSeq data
-
-        self.riboseq_assign_to = riboseq_assign_to
-        self.riboseq_assign_at = riboseq_assign_at
-
-        # Integrate protein annotations
-
         if include_gene3d:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
             self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome,
                                                  ero, ensembl_release=self.ensembl_release,
                                                  organism=self.organism, verbose=self.verbose)
+
 
     def create_gene_matrix(self, gene_id):
         pass
@@ -1001,10 +994,19 @@ class RiboSeqSixtymers(RiboSeqExperiment):
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
                  exclude_genes: list = None, verbose: bool = True, recalculate: bool = False):
-        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
-                         selection, protein_genome_instance, gene_info_dictionary,
-                         footprint_len_experiment, footprint_len_translatome,
-                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+        super().__init__(temp_repo_dir=temp_repo_dir,
+                         sam_paths_translatome=sam_paths_translatome,
+                         sam_paths_experiment=sam_paths_experiment,
+                         name_experiment=name_experiment,
+                         assignment=assignment,
+                         selection=selection,
+                         protein_genome_instance=protein_genome_instance,
+                         gene_info_dictionary=gene_info_dictionary,
+                         footprint_len_experiment=footprint_len_experiment,
+                         footprint_len_translatome=footprint_len_translatome,
+                         exclude_genes=exclude_genes,
+                         verbose=verbose,
+                         recalculate=recalculate)
 
     def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top= 5):
         # Arbitrarily 5 for all from the Arpat paper.
@@ -1176,10 +1178,19 @@ class RiboSeqSelective(RiboSeqExperiment):
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
                  exclude_genes=None, verbose=True, recalculate=False):
-        super().__init__(temp_repo_dir, sam_paths_translatome, sam_paths_experiment, name_experiment, assignment,
-                         selection, protein_genome_instance, gene_info_dictionary,
-                         footprint_len_experiment, footprint_len_translatome,
-                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+        super().__init__(temp_repo_dir=temp_repo_dir,
+                         sam_paths_translatome=sam_paths_translatome,
+                         sam_paths_experiment=sam_paths_experiment,
+                         name_experiment=name_experiment,
+                         assignment=assignment,
+                         selection=selection,
+                         protein_genome_instance=protein_genome_instance,
+                         gene_info_dictionary=gene_info_dictionary,
+                         footprint_len_experiment=footprint_len_experiment,
+                         footprint_len_translatome=footprint_len_translatome,
+                         exclude_genes=exclude_genes,
+                         verbose=verbose,
+                         recalculate=recalculate)
 
     def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
         pass
@@ -1191,10 +1202,19 @@ class RiboSeqCoco(RiboSeqExperiment):
                  selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
                  exclude_genes=None, verbose=True, recalculate=False):
-        super().__init__(temp_repo_dir, sam_paths_monosome, sam_paths_disome, name_experiment, assignment,
-                         selection, protein_genome_instance, gene_info_dictionary,
-                         footprint_len_experiment, footprint_len_translatome,
-                         exclude_genes=exclude_genes, verbose=verbose, recalculate=recalculate)
+        super().__init__(temp_repo_dir=temp_repo_dir,
+                         sam_paths_translatome=sam_paths_monosome,
+                         sam_paths_experiment=sam_paths_disome,
+                         name_experiment=name_experiment,
+                         assignment=assignment,
+                         selection=selection,
+                         protein_genome_instance=protein_genome_instance,
+                         gene_info_dictionary=gene_info_dictionary,
+                         footprint_len_experiment=footprint_len_experiment,
+                         footprint_len_translatome=footprint_len_translatome,
+                         exclude_genes=exclude_genes,
+                         verbose=verbose,
+                         recalculate=recalculate)
 
         self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_on_{self.riboseq_assign_to}_fitting_calculations.joblib")
         self.n_core = multiprocessing.cpu_count()
