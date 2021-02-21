@@ -26,8 +26,10 @@ from shutil import which
 from Bio.Seq import translate
 from Bio import pairwise2
 import matplotlib.pyplot as plt
+import seaborn as sns
 from functools import partial
 from scipy.signal import find_peaks, peak_widths, peak_prominences
+import psutil
 
 
 script_path_infrastructure = __file__
@@ -58,7 +60,8 @@ class Infrastructre:
 
         gene_info_database = gene_info_database[gene_info_database["transcript_biotype"] == "protein_coding"]
         self.gene_list = sorted(np.unique(gene_info_database["ensembl_gene_id"].dropna()))
-        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database, gene_info_names, gene_info_uniprot, verbose=self.verbose)
+        self.gene_info = gene_class_dict_generate(self.temp_repo_dir, self.gene_list, gene_info_database,
+                                                  gene_info_names, gene_info_uniprot, verbose=self.verbose)
 
         ero = ensembl_release_object_creator(self.temp_repo_dir, self.ensembl_release, self.organism)
 
@@ -592,22 +595,25 @@ class RiboSeqAssignment:
     joblib file to be used in later analysis. It can calculate RPKM and RPM for genes and gene positions.
     """
 
-    def __init__(self, sam_paths: list, temp_repo_dir: str, riboseq_assign_at: int, riboseq_assign_to: str,
+    def __init__(self, sam_paths: list, temp_repo_dir: str, riboseq_assign_at: Union[int, str], riboseq_assign_to: str,
                  riboseq_group: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 footprint_len: Union[int, list] = None, verbose: bool = True, recalculate: bool = False):
+                 footprint_len: Union[int, list] = None, n_core: int = multiprocessing.cpu_count() - 2,
+                 verbose: bool = True, recalculate: bool = False):
         """
         Init function.
         :param sam_paths: List of absolute path of SAM files, which are replicates of each other.
         :param temp_repo_dir: Full path directory where temporary files will be stored.
         :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at. '0' denotes to
         5' end 1st position and '1' denotes to 5' end 2nd position. '-1' corresponds to 3' 1st position, '-2'
-        corresponds to 3' 2nd position.
+        corresponds to 3' 2nd position. If it is "auto", then offsets will be calculated by the instance method
+        called calculate_offset.
         :param riboseq_assign_to: There are 2 options for this: either "best_transcript" or "gene". One selects the
         best transcript, which is determined by Gene class for this gene. The latter selects all CDS of a given gene,
         sorts and merges them. Using "gene" is not recommended as other parts of the pipeline is prepared for
         "best_transcript" but not for "gene" for now.
         :param riboseq_group: Unique string to identify the RiboSeq experiment. e.g "cocoassembly_monosome"
         :param protein_genome_instance: An instance of ProteinGenome class
+        :param n_core: Number of computer cores to be used.
         :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
         :param gene_info_dictionary: Output of gene_class_dict_generate() function
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
@@ -625,6 +631,7 @@ class RiboSeqAssignment:
         self.riboseq_group = riboseq_group  # Define riboseq_group variable for a function.
         self.recalculate = recalculate  # Save the whether 'recalculate' activated or not.
         self.footprint_len = footprint_len
+        self.n_core = n_core
 
         try:
             # Check if there is already a calculated object saved before.
@@ -639,11 +646,12 @@ class RiboSeqAssignment:
             # Check the current run is consistent with the saved file
             consistent_with = all([  # Make sure all below is True
                 all([os.path.basename(s) == os.path.basename(l)  # All SAM files have the same base name
-                     for s, l in zip(self.sam_paths, loaded_content.sam_paths)]),
+                     for s, l in itertools.zip_longest(self.sam_paths, loaded_content.sam_paths)]),
                 # Output file base name is the same. Also checks riboseq_group and riboseq_assign_to.
                 os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
                 self.riboseq_assign_at == loaded_content.riboseq_assign_at,
                 self.riboseq_assign_to == loaded_content.riboseq_assign_to,
+                # TODO: Burası çalışmıyor
                 self.footprint_len == loaded_content.footprint_len,
                 len(self.gene_list) == len(loaded_content.gene_list),  # There are the same amount of gene.
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),  # They are correctly sorted.
@@ -654,14 +662,33 @@ class RiboSeqAssignment:
                 raise AssertionError  # Raise the error to go to the except statement.
             # Otherwise, just accept the database saved in previous run.
             self.gene_assignments = loaded_content.gene_assignments
+            self.flanking_assignments = loaded_content.flanking_assignments
             self.gene_lengths = loaded_content.gene_lengths
             self.total_assigned_gene = loaded_content.total_assigned_gene
             self.total_assigned = loaded_content.total_assigned
+            self.length_distribution = loaded_content.length_distribution
+            self.footprint_len = loaded_content.footprint_len
+            self.offset = loaded_content.offset
+
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
+            if self.riboseq_assign_at == "auto":
+                self.offset = self.calculate_offset(self.n_core, protein_genome_instance,
+                                                    gene_info_dictionary, footprint_len=self.footprint_len,
+                                                    verbose=True, abundance_threshold=0.025,
+                                                    periodicity_threshold=0.5)
+                fl = sorted(self.offset.keys())   # It is a subset anyway
+            else:
+                fl = self.footprint_len
+                self.offset = None
+            # Initiate footprint length distribution, which will be calculated in the following line.
+            # Note: length_distribution is for footprints that satisfy length constraint but not always align to a CDS.
+            self.length_distribution = None
             print_verbose(verbose, f"{Col.H}Gene assignments are being calculated: {self.riboseq_group}{Col.E}")
-            self.gene_assignments = self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary,
-                                                                    footprint_len=self.footprint_len,
-                                                                    verbose=self.verbose)
+            temp_gene_assignments = self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary,
+                                                                    footprint_len=fl,
+                                                                    riboseq_assign_at=self.riboseq_assign_at,
+                                                                    calculate_distribution=True, verbose=self.verbose)
+            self.gene_assignments, self.flanking_assignments = temp_gene_assignments[0], temp_gene_assignments[1]
             # Calculate gene lengths as well, which can be used in different applications.
             self.gene_lengths = {i: int(self.gene_assignments[i].shape[1]) for i in self.gene_list}
             self.exclude_genes_calculate_stats(self.exclude_gene_list)  # Exclude genes, calculate RPM, RPKM etc.
@@ -683,25 +710,93 @@ class RiboSeqAssignment:
             empty_matrix = np.empty(self.gene_assignments[gene_id].shape)  # Create an empty array with the same shape
             empty_matrix.fill(np.nan)  # Fill the array with np.nan variables
             self.gene_assignments[gene_id] = empty_matrix  # Assign the empty array to the gene
+            # Apply the same thing for self.gene_flanking
+            empty_matrix = np.empty(self.flanking_assignments[gene_id].shape)
+            empty_matrix.fill(np.nan)
+            self.flanking_assignments[gene_id] = empty_matrix
         self.exclude_gene_list.extend(exclude_gene_list)  # Save which genes were excluded in the class variable
         # Calculate the total number of assignments for each gene and for all. Mainly, to use in RPM, RPKM calculations
         self.total_assigned_gene = {i: np.nansum(self.gene_assignments[i], axis=1) for i in self.gene_list}
         self.total_assigned = np.nansum(np.array(list(self.total_assigned_gene.values())), axis=0)
 
+    def calculate_offset(self, n_core, protein_genome_instance, gene_info_dictionary, verbose,
+                         footprint_len: Union[int, list] = None,
+                         abundance_threshold=0.025, periodicity_threshold=0.5):
+        window_len = 150
+        # First calculate the length
+        print_verbose(verbose, "Offset will be calculated by the program.\n"
+                               "Footprint length distribution is being calculated.")
+        length_dist = [self.footprint_assignment(sam_path, riboseq_assign_at=0, verbose=verbose, only_dist=True,
+                                                 calculate_distribution=True, footprint_len=footprint_len)
+                       for sam_path in self.sam_paths]
+        # Calculate total assignment for each replicate separately
+        total_assigned = [sum(i.values()) for i in length_dist]
+        # Calculate probability for each footprint length separately for each replicates
+        pros = [{k: i[k] / total_assigned[ind] for k in i.keys()} for ind, i in enumerate(length_dist)]
+        # Filter the probabilities based on a threshold
+        pros_filtered = [{k: i[k] for k in i.keys() if i[k] > abundance_threshold} for ind, i in enumerate(pros)]
+        # Select the footprint lengths that satisfy threshold for at least one replicate
+        selected_lengths = sorted({k for i in pros_filtered for k in i})
+        # Run individual gene assignments for these footprint lengths, assign at position 0.
+        print_verbose(verbose, f"Gene assignments are being calculated for footprints "
+                               f"with length {', '.join(map(str, selected_lengths))}.")
+        ia = self.assign_certain_lengths(selected_lengths, n_core, gene_info_dictionary=gene_info_dictionary,
+                                         protein_genome_instance=protein_genome_instance, riboseq_assign_at=0)
+        # Calculate periodicity windows for around stop codon for each footprint length.
+        print_verbose(verbose, f"Periodicity windows around stop codon are being calculated.")
+        calks = {i: self.periodicity_window(origin="stop", window_length=window_len+33, gene_assignments=ia[i]["gene"],
+                                            flanking_assignments=ia[i]["flanking"]) for i in ia.keys()}
+        # Calculate 'weighted' averages of these windows.
+        caulk = {i: np.average(calks[i], axis=0, weights=total_assigned) for i in calks.keys()}
+        # Calculate auto-correlation with defined offset (3 as codon length). Spearman test for monotonic relationship.
+        periodicity_filtered = [stats.spearmanr(caulk[i][:100], caulk[i][3:100 + 3])[0] > periodicity_threshold
+                                for i in selected_lengths]
+        # TODO:BURASI ÇALIŞMIYOR!
+        # Select only footprints that show periodicity, for which the assignment offset will be calculated.
+        selected_lengths = list(itertools.compress(selected_lengths, periodicity_filtered))
+        print_verbose(verbose, f"Assignment offsets for selected footprints ({', '.join(map(str, selected_lengths))}) "
+                               f"are being calculated.")
+        # For each length satisfying abundance and periodicity constraints.
+        offset = dict()
+        for sl in selected_lengths:
+            k = caulk[sl]  # Get the weighted average of the window with this length
+            # Sum the three consecutive elements, for three frames (shifted by 1 nt).
+            v = np.vstack([np.add.reduceat(m, np.arange(0, len(k) - 3, 3)) for m in [k[0:-3], k[1:-2], k[2:-1]]])
+            m = v / np.nanmedian(v, axis=1).reshape(v.shape[0], 1)  # Normalize the rows by the median value.
+            # Determine the positions where the sum is at least 2.5 more than
+            a, b = np.where(m > 2.5)
+            if len(a) < 1:  # If there is no triple nt whose sum is 2.5 times more than the median.
+                continue  # Consider this footprint having no peak at stop codon, discard.
+            # If there is more than one peak, get the right most peak, since we expect to see nothing after stop codon.
+            au, bu = np.unique(a), [sorted(b[a == i])[-1] for i in np.unique(a)]
+            ac, bc = au[v[au, bu].argmax()], bu[v[au, bu].argmax()]  # Get the values to construct the position formula.
+            # ac is frame, bc is position for triple sum. [ac + bc * 3, ac + bc * 3 + 2] -> Stop codon positions.
+            # window_len = ac + bc * 3 + k, where k is offset from 5' end.
+            offset[sl] = window_len - ac - bc * 3
+        # A perfect footprint can show different periodicity, [1, 0.1, 0.1] or [0.7, 0.3, 1] etc.
+
+        del ia, calks, caulk, length_dist
+        return offset
+
     def calculate_gene_assignments(self, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                                   footprint_len: Union[int, list] = None, verbose: bool = True):
+                                   riboseq_assign_at: Union[int, str], footprint_len: Union[int, list] = None,
+                                   calculate_distribution: bool = True,
+                                   verbose: bool = True):
         """
         Main method to calculate the assignments, which orchestrates the gene assignment by calling class methods and
         linking the outputs to determine the gene assignment.
         :param protein_genome_instance: An instance of ProteinGenome class
         :param gene_info_dictionary: Output of gene_class_dict_generate() function
+        :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at.
         :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
+        :param calculate_distribution: If True, calculated footprint length distributions will be saved.
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :return: Creates a class variable called gene_assignments, which is a dictionary.
         """
         # Get the mapping from chromosomes to list of genes that they carry.
         print_verbose(verbose, f"{Col.H}Genes are allocated to chromosomes.{Col.E}")
         chromosome_gene = self.chromosomes_genes_matcher(gene_info_dictionary, self.gene_list)
+
         # Get array of genomic positions for all genes, create a dictionary out of it.
         print_verbose(verbose, f"{Col.H}CDS ranges of genes are being calculated.{Col.E}")
         if self.riboseq_assign_to == "gene":  # For all CDS of a given gene, sorts and merges them
@@ -711,23 +806,166 @@ class RiboSeqAssignment:
             positions_gene = {gene_id: best_transcript_cds(protein_genome_instance, gene_info_dictionary, gene_id,
                                                            make_array=True) for gene_id in self.gene_list}
         else:  # For now, there is only two methods for CDS selection.
-            raise AssertionError("Selection variable must be either 'gene' or 'best_transcript'.")
+            raise AssertionError("'riboseq_assign_to' variable must be either 'gene' or 'best_transcript'.")
+        # Calculate positions_flanking to get the dictionary for flanking regions
+        # Initialize a dict & Define counts of extra nt from each end.
+        f5, f3, positions_flanking = 30, 33, dict()
+        for gene_id in positions_gene:  # Use the same genes which is used for gene assignment
+            fp, lp = positions_gene[gene_id][0], positions_gene[gene_id][
+                -1]  # Get first and last positions
+            ff = 1 if fp < lp else -1  # Get the orientation of the genome positions
+            near_start, near_end = np.arange(fp - f5 * ff, fp, ff), np.arange(lp + 1 * ff, lp + (f3 + 1) * ff, ff)
+            positions_flanking[gene_id] = np.concatenate([near_start, near_end])
+        # Resulting dictionary always follows 5'UTR, (no CDS), stop_codon,  3'UTR.
+
         # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
         print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
-        footprint_genome_assignment_list = [self.footprint_assignment(sam_path, assignment=self.riboseq_assign_at,
-                                                                      footprint_len=footprint_len, verbose=verbose)
-                                            for sam_path in self.sam_paths]
+        resulting_dicts = [self.footprint_assignment(sam_path, riboseq_assign_at, calculate_distribution,
+                                                     footprint_len=footprint_len, verbose=verbose, only_dist=False)
+                           for sam_path in self.sam_paths]
+        footprint_genome_assignment_list, footprint_length_distribution_list = list(map(list, zip(*resulting_dicts)))
+        # Save the calculations to a object variable if calculate_distribution is True.
+        if calculate_distribution:
+            self.length_distribution = footprint_length_distribution_list
+
         # Assign footprints to gene positions by calling footprint_counts_to_genes method.
         print_verbose(verbose, f"{Col.H}Footprint counts are being calculated and assigned to genes.{Col.E}")
-        return self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
-                                              positions_gene, verbose=verbose)
+        gene_assignment = self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
+                                                         positions_gene, verbose=verbose)
+        flanking_assignment = self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
+                                                             positions_flanking, verbose=verbose)
+        return gene_assignment, flanking_assignment
 
-    def _gene_assignments_for_list_of_lengths(self, x, y, z):
-        return [self.calculate_gene_assignments(protein_genome_instance=y, gene_info_dictionary=z,
-                                                footprint_len=i, verbose=False) for i in x]
+    def periodicity_window(self, origin: str, window_length: int, min_rpkm: int = 1,
+                           gene_assignments: dict = None, flanking_assignments: dict = None) -> np.ndarray:
+        """
+        Calculates meta-gene profile for translation start or stop sites, which is particularly useful to see
+        the characteristic periodicity of ribosome sequencing experiments. Since this method is primarily used in
+        testing, such as investigating the effect of different footprint lengths, 'gene_assignments' variable was not
+        set to 'self.gene_assignments'. As a consequence, calculations in calculate_gene_assignments method has to be
+        made again. Note that, if the periodicity of more than one footprint length is of interest, the
+        'gene_assignments' dictionaries which are the output of 'assign_for_defined_footprint_lengths' method
+        :param origin: Either 'start' or 'stop' to define the origin of the profile
+        :param window_length: Indicates how much nucleotide is of interest
+        :param min_rpkm: RPKM threshold to take genes into account for calculation of the profile.
+        :param gene_assignments: Gene assignment dictionary, output of footprint_counts_to_genes
+        :param flanking_assignments: Flanking assignment dictionary, output of footprint_counts_to_genes
+        :return: Average normalized read density for selected parameters.
+        """
+        assert origin in ["start", "stop"]  # Make sure origin is defined properly.
+        # If assignment dictionaries are not given, just get the object variables
+        if not gene_assignments or not flanking_assignments:
+            gene_assignments = self.gene_assignments
+            flanking_assignments = self.flanking_assignments
+            total_assigned_gene = self.total_assigned_gene
+            total_assigned = self.total_assigned
+        else:  # Else start with filtering genes in exclude_gene_list
+            for gene_id in self.exclude_gene_list:  # For genes in the list
+                empty_matrix = np.empty(gene_assignments[gene_id].shape)  # Create an empty array with the same shape
+                empty_matrix.fill(np.nan)  # Fill the array with np.nan variables
+                gene_assignments[gene_id] = empty_matrix  # Assign the empty array to the gene
+                # Apply the same thing for flanking_assignments
+                empty_matrix = np.empty(flanking_assignments[gene_id].shape)
+                empty_matrix.fill(np.nan)
+                flanking_assignments[gene_id] = empty_matrix
+            # Calculate the total number of assignments for each gene and for all. To use in RPM, RPKM calculations
+            total_assigned_gene = {i: np.nansum(gene_assignments[i], axis=1) for i in self.gene_list}
+            total_assigned = np.nansum(np.array(list(total_assigned_gene.values())), axis=0)
 
-    def assign_for_defined_footprint_lengths(self, footprint_lengths, n_core,
-                                             protein_genome_instance, gene_info_dictionary):
+        # Create zero lists with the length of window_length
+        dim = len(self.sam_paths)
+        small_float = 1e-24
+        the_sum, the_counts = np.zeros((dim, window_length)), np.zeros((dim, window_length))
+        for gene_id in self.gene_list:  # For all genes in the gene_list
+            rpm_pos_gene = (gene_assignments[gene_id].T / total_assigned * 1e6).T
+            rpm_pos_flan = (flanking_assignments[gene_id].T / total_assigned * 1e6).T
+            gene_rpkm = total_assigned_gene[gene_id] / total_assigned * 1e9 / rpm_pos_flan.shape[1]
+            if np.isnan(rpm_pos_gene[0, 0]):  # For excluded genes: np.nan values will distort the calculation
+                continue  # Skip them. Note: np.nan can only be found for excluded genes.
+            rpm_positions = np.hstack([rpm_pos_flan[:, :30], rpm_pos_gene, rpm_pos_flan[:, -33:]])  # Merge
+            # If total RPM is zero, following division will be np.inf. As we already filter out based on RPKM, the zero
+            # values are replaced with a fairly small floating number.
+            total_rpm = np.sum(rpm_positions, axis=1).reshape(dim, 1)
+            total_rpm[total_rpm == 0] = small_float
+            if origin == "start":
+                norm_rpm = (rpm_positions / total_rpm)[:, :window_length]
+                # For each replicate calculate if the replicate rpkm value for a gene is above threshold
+                filter_rpkm = np.repeat((gene_rpkm > min_rpkm).reshape(dim, 1), norm_rpm.shape[1], axis=1).astype(int)
+                # Calculates even though the gene length is less then window_length
+                the_sum[:, :norm_rpm.shape[1]] += norm_rpm * filter_rpkm
+                # Take into account the number of genes contributed to window positions. So, get the counts.
+                the_counts[:, :norm_rpm.shape[1]] += np.ones((dim, norm_rpm.shape[1])) * filter_rpkm
+            else:  # The same procedure but for 'stop' origin
+                norm_rpm = (rpm_positions / total_rpm)[:, -window_length:]
+                filter_rpkm = np.repeat((gene_rpkm > min_rpkm).reshape(dim, 1), norm_rpm.shape[1], axis=1).astype(int)
+                the_sum[:, -norm_rpm.shape[1]:] += norm_rpm * filter_rpkm
+                the_counts[:, -norm_rpm.shape[1]:] += np.ones((dim, norm_rpm.shape[1])) * filter_rpkm
+
+        return the_sum / the_counts  # Return the result as np.ndarray
+
+    def plot_periodicity(self, periodicity_array, origin, title="Periodicity"):
+        palette = sns.color_palette("cubehelix", len(self.sam_paths))
+        periodicity_array = periodicity_array * 1000
+        plt.figure(figsize=(18, 4))
+        for ind in range(len(self.sam_paths)):
+            if origin == "start":
+                plt.plot(np.arange(-30, len(periodicity_array[ind]) - 30), periodicity_array[ind], color=palette[ind],
+                         marker=".", label=os.path.basename(self.sam_paths[ind]))
+            else:  # origin == "stop":
+                plt.plot(np.arange(-len(periodicity_array[ind]) + 33, 33), periodicity_array[ind], color=palette[ind],
+                         marker=".", label=os.path.basename(self.sam_paths[ind]))
+        plt.title(title, fontweight="bold", y=1.05)
+        plt.ylabel(r"Average normalized read density ($\times10^{-3}$)")
+        plt.xlabel(f"Position from translation {origin} site")
+        plt.legend(title='Replicates', bbox_to_anchor=(1, 1), loc='upper left')
+        plt.tight_layout()
+        plt.show()
+
+    def plot_footprint_length_distribution(self, method="stack"):
+        """
+        Plots the footprint length distribution with following settings.
+        :return: Always returns None
+        """
+        palette = sns.color_palette("cubehelix", len(self.sam_paths))
+        the_lengths = sorted({lm for ld in self.length_distribution for lm in ld})
+        if method == "stack":
+            plt.figure(figsize=(12, 7.5))
+            last_plotted = np.zeros(len(the_lengths))
+            for ind, ld in enumerate(self.length_distribution):
+                the_values = np.array([ld.get(fpl, 0) for fpl in the_lengths])
+                plt.bar(the_lengths, the_values, bottom=last_plotted, color=palette[ind],
+                        label=os.path.basename(self.sam_paths[ind]), linewidth=0)
+                last_plotted += the_values
+            plt.ylabel("Count")
+
+        elif method == "percent":
+            plt.figure(figsize=(12, 7.5))
+            the_values = np.zeros((len(self.sam_paths), len(the_lengths)))
+            for ind, ld in enumerate(self.length_distribution):
+                the_values[ind] = np.array([ld.get(fpl, 0) for fpl in the_lengths])
+            the_total = np.sum(the_values, axis=0)
+            last_plotted = np.zeros(len(the_lengths))
+            for ind, ld in enumerate(the_values):
+                plt.bar(the_lengths, ld / the_total * 100, bottom=last_plotted, color=palette[ind],
+                        label=os.path.basename(self.sam_paths[ind]), linewidth=0.5, edgecolor="white", width=1)
+                last_plotted += ld / the_total * 100
+            plt.ylabel("Percent")
+        else:
+            raise ValueError
+        plt.xlabel("Footprint Length")
+        plt.title("Genome-wide Footprint Length Distribution", fontweight="bold", y=1.05)
+        plt.legend(title='Replicates', bbox_to_anchor=(1, 1), loc='upper left')
+        plt.tight_layout()
+        plt.gca().spines["top"].set_visible(False)
+        plt.gca().spines["right"].set_visible(False)
+        plt.show()
+
+    def _assign_certain_lengths_helper(self, x, y, z, t):
+        return [self.calculate_gene_assignments(y, z, footprint_len=i, verbose=False, riboseq_assign_at=t,
+                                                calculate_distribution=False) for i in x]
+
+    def assign_certain_lengths(self, footprint_lengths, n_core, riboseq_assign_at,
+                               protein_genome_instance, gene_info_dictionary):
         """
         oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
         oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
@@ -735,19 +973,23 @@ class RiboSeqAssignment:
         oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
         :param footprint_lengths:
         :param n_core:
+        :param riboseq_assign_at:
         :param protein_genome_instance:
         :param gene_info_dictionary:
         :return:
         """
-
-        ga_lol = partial(self._gene_assignments_for_list_of_lengths, y=protein_genome_instance, z=gene_info_dictionary)
+        estimated_max_memory_consumption_of_a_single_run = 4e9
+        if psutil.virtual_memory().free / estimated_max_memory_consumption_of_a_single_run < len(footprint_lengths):
+            raise MemoryError
+        ga_lol = partial(self._assign_certain_lengths_helper,
+                         y=protein_genome_instance, z=gene_info_dictionary, t=riboseq_assign_at)
         chunk_size = math.ceil(len(footprint_lengths) / n_core)
         gene_list_chunks = [footprint_lengths[i: i + chunk_size] for i in range(0, len(footprint_lengths), chunk_size)]
         executor = multiprocessing.Pool(len(gene_list_chunks))
         result = executor.map(ga_lol, gene_list_chunks)
         executor.terminate()
         executor.join()
-        result = [j for i in result for j in i]  # Flatten
+        result = [{"gene": j[0], "flanking": j[1]} for i in result for j in i]  # Flatten
         return dict(zip(footprint_lengths, result))
 
     @staticmethod
@@ -765,24 +1007,24 @@ class RiboSeqAssignment:
             chromosomes[contig] = chromosomes.get(contig, []) + [gene_id]
         return chromosomes  # Return the resulting filled dictionary
 
-    @staticmethod
-    def footprint_assignment(sam_path: str, assignment: int, verbose: bool = False,
-                             footprint_len: Union[int, list] = None) -> dict:
+    def footprint_assignment(self, sam_path: str, riboseq_assign_at: Union[int, str],
+                             calculate_distribution: bool, only_dist: bool = False, verbose: bool = False,
+                             footprint_len: Union[int, list] = None) -> Union[dict, tuple]:
         """
         Assigns the footprints into chromosomes and then into genomic positions. However, assigning to the genes are
         not a part of this method.
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :param sam_path: UMI deduplicated final SAM file path to use for genome assignment.
-        :param assignment: The position on the footprint where the footprint will be assigned at. '0' denotes to
+        :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at. '0' denotes to
         5' end 1st position and '1' denotes to 5' end 2nd position. '-1' corresponds to 3' 1st position, '-2'
-        corresponds to 3' 2nd position. Note that '-15' → Arpat et. al 2020
+        corresponds to 3' 2nd position. If it is a dict, then offsets could be different depending on footprint length.
+        :param calculate_distribution: If True, calculated footprint length distributions will be calculated.
+        :param only_dist: If True, only footprint length distribution will be calculated.
         :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
-        :return: Dictionary of assigned positions
+        :return: Dictionary of assigned positions as well as footprint length distribution
         """
-        # Calculate the assignment position for footprints in reverse or forward strand. Note that The method normally
-        # accepts the assignment for forward strand.
-        assignment_forward, assignment_reverse = assignment, -assignment - 1
 
+        dist_single = dict()  # Initiate to calculate length distribution for given SAM
         if verbose:  # Count the number of lines in SAM file to be able to print a progress bar.
             with pysam.AlignmentFile(sam_path, "r") as sam_handle:  # Open SAM file with pysam library
                 iteration = sam_handle.count()  # Call count method to find out total read count.
@@ -824,11 +1066,26 @@ class RiboSeqAssignment:
                 if footprint_len and isinstance(footprint_len, list) and len(reference_positions) not in footprint_len:
                     counter_footprint_length += 1
                     continue
+                # Fill up the dictionary for footprint length distribution
+                if calculate_distribution:
+                    dist_single[len(reference_positions)] = dist_single.get(len(reference_positions), 0) + 1
+                if only_dist and calculate_distribution:  # Skip remaining if only distribution is of interest
+                    continue
+
+                if isinstance(riboseq_assign_at, int):
+                    # Calculate the assignment position for footprints in reverse or forward strand. Note that the
+                    # method normally accepts the assignment for forward strand.
+                    assignment_forward, assignment_reverse = riboseq_assign_at, -riboseq_assign_at - 1
+                elif isinstance(riboseq_assign_at, str) and riboseq_assign_at == "auto":
+                    assignment_position = self.offset[len(reference_positions)]
+                    assignment_forward, assignment_reverse = assignment_position, -assignment_position - 1
+                else:
+                    raise ValueError
 
                 try:
                     if e.is_reverse:  # If reverse use the assigned position calculated in the beginning of the method.
                         assigned_nucleotide = reference_positions[assignment_reverse]
-                    else:  # Please note that assignment_forward is actually equal to assignment variable.
+                    else:  # Please note that assignment_forward is actually equal to riboseq_assign_at variable.
                         assigned_nucleotide = reference_positions[assignment_forward]
                 except IndexError:  # If list index out of range.
                     counter += 1  # This is the case if footprint is shorter than desired assigned position.
@@ -839,17 +1096,20 @@ class RiboSeqAssignment:
                 else:  # Add the assigned position of the footprint into the relevant list in the dictionary
                     assigned_positions[e.reference_name].append(assigned_nucleotide)
 
-        # After assignment ends for each entry in the chromosome dictionary
-        for chromosome in assigned_positions:
-            assigned_positions[chromosome] = np.sort(np.array(assigned_positions[chromosome]))  # Make np.array and sort
-
         if verbose and counter:  # Report the number of footprints skipped.
             print(f"{Col.W}{counter} footprints were skipped because assignment index was out of range.{Col.E}")
 
         if verbose and counter_footprint_length:  # Report the number of footprints skipped.
             print(f"{Col.W}{counter_footprint_length} footprints were skipped due to length constraint.{Col.E}")
 
-        return assigned_positions  # Return the filled dictionary
+        if only_dist and calculate_distribution:  # Return if only distribution is of interest
+            return dist_single
+
+        # After assignment ends for each entry in the chromosome dictionary
+        for chromosome in assigned_positions:
+            assigned_positions[chromosome] = np.sort(np.array(assigned_positions[chromosome]))  # Make np.array and sort
+
+        return assigned_positions, dist_single  # Return the filled dictionaries
 
     @staticmethod
     def footprint_counts_to_genes(footprint_genome_assignment_list: list, chromosome_gene_map: dict,
@@ -949,61 +1209,65 @@ class RiboSeqExperiment:
 
     """
 
-    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str,
-                 assignment: int, selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+    def __init__(self, temp_repo_dir, sam_paths_background: list, sam_paths_experiment: list, name_experiment: str,
+                 riboseq_assign_at: int, riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
                  exclude_genes: list = None, verbose=True, recalculate=False):
 
         self.temp_repo_dir = temp_repo_dir
-        self.sam_paths_translatome = sam_paths_translatome
+        self.sam_paths_background = sam_paths_background
         self.sam_paths_experiment = sam_paths_experiment
         self.name_experiment = name_experiment
-        self.riboseq_assign_to = selection
-        self.riboseq_assign_at = assignment
+        self.riboseq_assign_to = riboseq_assign_to
+        self.riboseq_assign_at = riboseq_assign_at
         self.exclude_genes = [] if not exclude_genes else exclude_genes
         self.verbose = verbose
         self.recalculate = recalculate
         self.gene_list = sorted(gene_info_dictionary.keys())
 
-        self.translatome = RiboSeqAssignment(self.sam_paths_translatome, self.temp_repo_dir, self.riboseq_assign_at,
-                                             self.riboseq_assign_to, name_experiment + "_translatome",
-                                             protein_genome_instance, gene_info_dictionary,
-                                             footprint_len=footprint_len_translatome)
+        self.background = RiboSeqAssignment(self.sam_paths_background, self.temp_repo_dir, self.riboseq_assign_at,
+                                            self.riboseq_assign_to, name_experiment + "_background",
+                                            protein_genome_instance, gene_info_dictionary,
+                                            footprint_len=footprint_len_background,
+                                            recalculate = self.recalculate, verbose=self.verbose)
         self.experiment = RiboSeqAssignment(self.sam_paths_experiment, self.temp_repo_dir, self.riboseq_assign_at,
                                             self.riboseq_assign_to, name_experiment + "_experiment",
                                             protein_genome_instance, gene_info_dictionary,
-                                            footprint_len=footprint_len_experiment)
+                                            footprint_len=footprint_len_experiment,
+                                            recalculate=self.recalculate, verbose=self.verbose)
 
         if self.exclude_genes:
             # Bu sayede kaydedilen assignment dosyaları tekrar tekrar kullanılabilir oluyor
-            self.translatome.exclude_genes_calculate_stats(self.exclude_genes)
+            self.background.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
 
     def normalized_rpm_positions(self, gene_id, smoothen=True, *args, **kwargs):
         positions_experiment = self.experiment.calculate_rpm_positions(gene_id, average=True)
-        positions_translatome = self.translatome.calculate_rpm_positions(gene_id, average=True)
+        positions_background = self.background.calculate_rpm_positions(gene_id, average=True)
         if smoothen:
             positions_experiment = smooth_array(positions_experiment, *args, **kwargs)
-            positions_translatome = smooth_array(positions_translatome, *args, **kwargs)
-        return positions_experiment / (positions_experiment + positions_translatome)
+            positions_background = smooth_array(positions_background, *args, **kwargs)
+        return positions_experiment / (positions_experiment + positions_background)
 
 
 class RiboSeqSixtymers(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+    def __init__(self, temp_repo_dir, sam_paths_background: list, sam_paths_experiment: list, name_experiment: str,
+                 riboseq_assign_at: Union[int, str],
+                 riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
                  exclude_genes: list = None, verbose: bool = True, recalculate: bool = False):
+
         super().__init__(temp_repo_dir=temp_repo_dir,
-                         sam_paths_translatome=sam_paths_translatome,
+                         sam_paths_background=sam_paths_background,
                          sam_paths_experiment=sam_paths_experiment,
                          name_experiment=name_experiment,
-                         assignment=assignment,
-                         selection=selection,
+                         riboseq_assign_at=riboseq_assign_at,
+                         riboseq_assign_to=riboseq_assign_to,
                          protein_genome_instance=protein_genome_instance,
                          gene_info_dictionary=gene_info_dictionary,
                          footprint_len_experiment=footprint_len_experiment,
-                         footprint_len_translatome=footprint_len_translatome,
+                         footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
                          verbose=verbose,
                          recalculate=recalculate)
@@ -1011,9 +1275,9 @@ class RiboSeqSixtymers(RiboSeqExperiment):
     def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top= 5):
         # Arbitrarily 5 for all from the Arpat paper.
         land = self.experiment.calculate_rpm_positions(gene_id, average=True)  # library size normalized disome peaks
-        
+
         normalized_peak_count = np.sum(land > 0)  # to test whether normalized peak count > 5
-        mmc = self.translatome.calculate_rpm_genes(gene_id, average=True)  # mean monosome count
+        mmc = self.background.calculate_rpm_genes(gene_id, average=True)  # mean monosome count
         if mmc < mmc_threshold or normalized_peak_count < normalized_peak_count_thr:
             return np.array([])
         else:
@@ -1021,19 +1285,19 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return normalized_rpm.argsort()[-get_top:][::-1]  # Arbitrarily 5
 
     def stalling_peaks_inecik_1(self, gene_id, percentile=90, window="hanning", window_len=23,
-                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+                                min_rpkm_sixtymers=-1, min_rpkm_background=1):
         try:
             assert type(self.aux_var_inecik_1)
-            assert self.aux_var_inecik_1_params == (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            assert self.aux_var_inecik_1_params == (window, window_len, min_rpkm_sixtymers, min_rpkm_background)
         except (AttributeError, AssertionError):
-            self.aux_var_inecik_1_params = (window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_1_params = (window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             self.aux_var_inecik_1 = [exp_rpm_s[find_peaks(exp_rpm_s)[0]] for exp_rpm_s in
-                                     self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)]
+                                     self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_background)]
             self.aux_var_inecik_1 = np.log10(np.concatenate(self.aux_var_inecik_1, axis=0))
         threshold = np.percentile(self.aux_var_inecik_1, percentile)
 
         try:
-            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             peaks = find_peaks(exp_rpm_s)[0]
             peak_values = exp_rpm_s[peaks]
             return peaks[np.log10(peak_values) > threshold] - 1  # Added zero in the beginning
@@ -1041,14 +1305,14 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return np.array([])
 
     def stalling_peaks_inecik_2(self, gene_id, percentile=90, window="hanning", window_len=23, wlen=300,
-                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+                                min_rpkm_sixtymers=-1, min_rpkm_background=1):
         try:
             assert type(self.aux_var_inecik_2)
-            assert self.aux_var_inecik_2_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            assert self.aux_var_inecik_2_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
         except (AttributeError, AssertionError):
-            self.aux_var_inecik_2_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_2_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
             self.aux_var_inecik_2 = list()
-            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_background):
                 peaks, _ = find_peaks(exp_rpm_s)
                 calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
                 calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
@@ -1057,7 +1321,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         threshold = np.percentile(self.aux_var_inecik_2, percentile)
 
         try:
-            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             peaks, _ = find_peaks(exp_rpm_s)
             calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
             calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
@@ -1067,15 +1331,15 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return np.array([])
 
     def stalling_peaks_inecik_3(self, gene_id, probability=0.02, window="hanning", window_len=23, wlen=300,
-                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+                                min_rpkm_sixtymers=-1, min_rpkm_background=1):
 
         try:
             assert type(self.aux_var_inecik_3)
-            assert self.aux_var_inecik_3_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            assert self.aux_var_inecik_3_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
         except (AttributeError, AssertionError):
-            self.aux_var_inecik_3_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_3_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
             calc_peak_width, calc_peak_prominence = list(), list()
-            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_background):
                 peaks, _ = find_peaks(exp_rpm_s)
                 calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
                 calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
@@ -1097,7 +1361,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             self.aux_var_inecik_3 = (params_w, params_h, params_h_additional)
 
         try:
-            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             peaks, _ = find_peaks(exp_rpm_s)
             calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
             calc_widths = peak_widths(exp_rpm_s, rel_height=1, peaks=peaks, prominence_data=calc_prominences, wlen=wlen)
@@ -1112,14 +1376,14 @@ class RiboSeqSixtymers(RiboSeqExperiment):
             return np.array([])
 
     def stalling_peaks_inecik_4(self, gene_id, percentile=90, window="hanning", window_len=23, wlen=300,
-                                min_rpkm_sixtymers=-1, min_rpkm_translatome=1):
+                                min_rpkm_sixtymers=-1, min_rpkm_background=1):
         try:
             assert type(self.aux_var_inecik_4)
-            assert self.aux_var_inecik_4_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            assert self.aux_var_inecik_4_params == (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
         except (AttributeError, AssertionError):
-            self.aux_var_inecik_4_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_translatome)
+            self.aux_var_inecik_4_params = (window, window_len, wlen, min_rpkm_sixtymers, min_rpkm_background)
             self.aux_var_inecik_4 = list()
-            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+            for exp_rpm_s in self.inecik_gene_iterator(window, window_len, min_rpkm_sixtymers, min_rpkm_background):
                 peaks, _ = find_peaks(exp_rpm_s)
                 calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
                 self.aux_var_inecik_4.extend(list(calc_prominences[0]))
@@ -1127,34 +1391,34 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         threshold = np.percentile(self.aux_var_inecik_4, percentile)
 
         try:
-            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+            exp_rpm_s = self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             peaks, _ = find_peaks(exp_rpm_s)
             calc_prominences = peak_prominences(exp_rpm_s, peaks=peaks, wlen=wlen)
             return peaks[np.log10(calc_prominences[0]) > threshold] - 1  # Added zero in the beginning
         except AssertionError:
             return np.array([])
 
-    def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+    def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background):
         exp_rpkm = self.experiment.calculate_rpkm_genes(gene_id)
-        tra_rpkm = self.translatome.calculate_rpkm_genes(gene_id)
+        bac_rpkm = self.background.calculate_rpkm_genes(gene_id)
         exp_rpm_bs = self.experiment.calculate_rpm_positions(gene_id)
-        assert exp_rpkm > min_rpkm_sixtymers and tra_rpkm > min_rpkm_translatome
+        assert exp_rpkm > min_rpkm_sixtymers and bac_rpkm > min_rpkm_background
         assert len(exp_rpm_bs) > window_len
-        rpm_gene = self.translatome.calculate_rpm_genes(gene_id)
+        rpm_gene = self.background.calculate_rpm_genes(gene_id)
         exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene) + [0]
         return np.array(exp_rpm_s)
 
-    def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome):
+    def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_background):
         for gene_id in self.gene_list:
             try:
-                yield self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_translatome)
+                yield self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
             except AssertionError:
                 continue
 
     def plot_result(self, gene_id, function, *args, **kwargs):
         total_exp = self.experiment.calculate_rpkm_genes(gene_id)
-        total_tra = self.translatome.calculate_rpkm_genes(gene_id)
-        rpm_tra = self.translatome.calculate_rpm_genes(gene_id)
+        total_tra = self.background.calculate_rpkm_genes(gene_id)
+        rpm_tra = self.background.calculate_rpm_genes(gene_id)
         arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / rpm_tra
         peaks = function(gene_id, *args, **kwargs)
         # Plot
@@ -1174,44 +1438,44 @@ class RiboSeqSixtymers(RiboSeqExperiment):
 
 class RiboSeqSelective(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_translatome: list, sam_paths_experiment: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
-                 exclude_genes=None, verbose=True, recalculate=False):
+    def __init__(self, temp_repo_dir, sam_paths_background: list, sam_paths_experiment: list, name_experiment: str, riboseq_assign_at: int,
+                 riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
+                 exclude_genes: list = None, verbose=True, recalculate=False):
         super().__init__(temp_repo_dir=temp_repo_dir,
-                         sam_paths_translatome=sam_paths_translatome,
+                         sam_paths_background=sam_paths_background,
                          sam_paths_experiment=sam_paths_experiment,
                          name_experiment=name_experiment,
-                         assignment=assignment,
-                         selection=selection,
+                         riboseq_assign_at=riboseq_assign_at,
+                         riboseq_assign_to=riboseq_assign_to,
                          protein_genome_instance=protein_genome_instance,
                          gene_info_dictionary=gene_info_dictionary,
                          footprint_len_experiment=footprint_len_experiment,
-                         footprint_len_translatome=footprint_len_translatome,
+                         footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
                          verbose=verbose,
                          recalculate=recalculate)
 
-    def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_translatome, min_gene_rpkm_translatome):
+    def calculate_binding_positions(self, normalized_rpm_threshold, min_gene_rpm_background, min_gene_rpkm_background):
         pass
 
 
 class RiboSeqCoco(RiboSeqExperiment):
 
-    def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, name_experiment: str, assignment: int,
-                 selection: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                 footprint_len_experiment: Union[int, list] = None, footprint_len_translatome: Union[int, list] = None,
+    def __init__(self, temp_repo_dir, sam_paths_monosome: list, sam_paths_disome: list, name_experiment: str, riboseq_assign_at: int,
+                 riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
                  exclude_genes=None, verbose=True, recalculate=False):
         super().__init__(temp_repo_dir=temp_repo_dir,
-                         sam_paths_translatome=sam_paths_monosome,
+                         sam_paths_background=sam_paths_monosome,
                          sam_paths_experiment=sam_paths_disome,
                          name_experiment=name_experiment,
-                         assignment=assignment,
-                         selection=selection,
+                         riboseq_assign_at=riboseq_assign_at,
+                         riboseq_assign_to=riboseq_assign_to,
                          protein_genome_instance=protein_genome_instance,
                          gene_info_dictionary=gene_info_dictionary,
                          footprint_len_experiment=footprint_len_experiment,
-                         footprint_len_translatome=footprint_len_translatome,
+                         footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
                          verbose=verbose,
                          recalculate=recalculate)
@@ -1254,7 +1518,7 @@ class RiboSeqCoco(RiboSeqExperiment):
         if self.verbose:
             print(f"{Col.H}Calculations is being written to directory: {self.temp_repo_dir}{Col.E}")
         to_dump = {"sam_paths_disome": self.sam_paths_experiment,
-                   "sam_paths_monosome": self.sam_paths_translatome,
+                   "sam_paths_monosome": self.sam_paths_background,
                    "output_file_name_fitting_calc": self.output_file_name_fitting_calc,
                    "riboseq_assign_at": self.riboseq_assign_at,
                    "gene_list": self.gene_list,
@@ -1268,10 +1532,6 @@ class RiboSeqCoco(RiboSeqExperiment):
         if verbose:
             print(f"{Col.H}Fitting calculations found for {name_experiment} in path: {output_file_name}{Col.E}")
         return joblib.load(output_file_name)
-
-    def normalized_rpm_positions(self, *args, **kwargs):
-        # Overrides parent method
-        raise AssertionError("There is no translatome to calculate this.")
 
     def binomial_fitting(self, gene_list, n_core):
         with warnings.catch_warnings():
@@ -1298,7 +1558,7 @@ class RiboSeqCoco(RiboSeqExperiment):
     def create_bf(self, gene_id):  # BF = binomial fitting instance
         # below lines are identical to plot results
         disome_counts = np.sum(self.experiment.gene_assignments[gene_id], axis=0)  # mean problem çıkartıyor,
-        monosome_counts = np.sum(self.translatome.gene_assignments[gene_id], axis=0)
+        monosome_counts = np.sum(self.background.gene_assignments[gene_id], axis=0)
         x_data = np.arange(1, len(disome_counts) + 1)
         return BinomialFitting(x_data, disome_counts, monosome_counts)
 

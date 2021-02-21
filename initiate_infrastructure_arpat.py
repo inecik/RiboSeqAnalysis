@@ -19,10 +19,10 @@ I = Infrastructre(temp_repo_dir,
                   verbose=True)
 
 I.riboseq_sixtymers = RiboSeqSixtymers(I.temp_repo_dir, monosomes, disomes, "sixtymers",
-                                       selection="best_transcript", assignment=-15,
+                                       riboseq_assign_to="best_transcript", riboseq_assign_at=-15,
                                        protein_genome_instance=I.protein_genome,
                                        gene_info_dictionary=I.gene_info,
                                        exclude_genes=I.exclude_genes, verbose=I.verbose,
                                        footprint_len_experiment=list(range(45,71)),  # From paper
-                                       footprint_len_translatome=list(range(26,36))  # From paper
+                                       footprint_len_background=list(range(26, 36))  # From paper
                                        )
