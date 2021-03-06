@@ -12,6 +12,7 @@ import itertools
 # import logging  # todo
 
 import joblib
+from contextlib import closing
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -29,6 +30,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from functools import partial
 from scipy.signal import find_peaks, peak_widths, peak_prominences
+from scipy.signal import deconvolve
 import psutil
 
 
@@ -598,7 +600,7 @@ class RiboSeqAssignment:
     def __init__(self, sam_paths: list, temp_repo_dir: str, riboseq_assign_at: Union[int, str], riboseq_assign_to: str,
                  riboseq_group: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len: Union[int, list] = None, n_core: int = multiprocessing.cpu_count() - 2,
-                 verbose: bool = True, recalculate: bool = False):
+                 exclude_genes: list = None, verbose: bool = True, recalculate: bool = False):
         """
         Init function.
         :param sam_paths: List of absolute path of SAM files, which are replicates of each other.
@@ -622,9 +624,9 @@ class RiboSeqAssignment:
         self.sam_paths = sorted(sam_paths)  # Sort the transcript list in case it is not sorted and assign
         self.temp_repo_dir = temp_repo_dir  # Save the 'temp_repo_dir'
         # Get the absolute output file name.
-        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}_on_{riboseq_assign_to}.joblib")
+        self.output_file_name = os.path.join(temp_repo_dir, f"riboseq_{riboseq_group}.joblib")
         self.gene_list = sorted(gene_info_dictionary.keys())  # Sort the gene list in case it is not sorted and assign
-        self.exclude_gene_list = list()  # To keep the list of genes which should be excluded.
+        self.exclude_gene_list = list() if not exclude_genes else exclude_genes
         self.riboseq_assign_at = riboseq_assign_at
         self.riboseq_assign_to = riboseq_assign_to
         self.verbose = verbose  # Save the whether 'verbose' activated or not
@@ -632,6 +634,7 @@ class RiboSeqAssignment:
         self.recalculate = recalculate  # Save the whether 'recalculate' activated or not.
         self.footprint_len = footprint_len
         self.n_core = n_core
+        self.f3, self.f5 = 33, 30  # Number of nucleotides in 3' and 5' ends of the genes
 
         try:
             # Check if there is already a calculated object saved before.
@@ -651,7 +654,6 @@ class RiboSeqAssignment:
                 os.path.basename(self.output_file_name) == os.path.basename(loaded_content.output_file_name),
                 self.riboseq_assign_at == loaded_content.riboseq_assign_at,
                 self.riboseq_assign_to == loaded_content.riboseq_assign_to,
-                # TODO: Burası çalışmıyor
                 self.footprint_len == loaded_content.footprint_len,
                 len(self.gene_list) == len(loaded_content.gene_list),  # There are the same amount of gene.
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),  # They are correctly sorted.
@@ -667,33 +669,48 @@ class RiboSeqAssignment:
             self.total_assigned_gene = loaded_content.total_assigned_gene
             self.total_assigned = loaded_content.total_assigned
             self.length_distribution = loaded_content.length_distribution
+            self.exclude_gene_list = loaded_content.exclude_gene_list
             self.footprint_len = loaded_content.footprint_len
             self.offset = loaded_content.offset
 
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
-            if self.riboseq_assign_at == "auto":
-                self.offset = self.calculate_offset(self.n_core, protein_genome_instance,
-                                                    gene_info_dictionary, footprint_len=self.footprint_len,
-                                                    verbose=True, abundance_threshold=0.025,
-                                                    periodicity_threshold=0.5)
-                fl = sorted(self.offset.keys())   # It is a subset anyway
+
+            # Get the mapping from chromosomes to list of genes that they carry.
+            chromosome_gene = self.chromosomes_genes_matcher(gene_info_dictionary, self.gene_list)
+
+            if self.riboseq_assign_at == "test":
+                pass
+            elif self.riboseq_assign_at == "auto":
+                self.gene_assignments, self.flanking_assignments, self.offset = self.calculate_offset(
+                    self.n_core, chromosome_gene, protein_genome_instance, gene_info_dictionary)
             else:
-                fl = self.footprint_len
+                # Get array of genomic positions for all genes, create a dictionary out of it.
+                positions_gene, positions_flanking = self.create_positions_genome(
+                    protein_genome_instance, gene_info_dictionary, self.f5, self.f3)
+
+                # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
+                print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
+                resulting_dicts = [self.footprint_assignment(
+                    sam_path, self.riboseq_assign_at, split_by_length=False, calculate_distribution=True,
+                    footprint_len=self.footprint_len, verbose=self.verbose, only_dist=False)
+                    for sam_path in self.sam_paths]
+                footprint_genome_assignment_list, self.length_distribution = list(map(list, zip(*resulting_dicts)))
+
+                # Assign footprints to gene positions by calling footprint_counts_to_genes method.
+                print_verbose(verbose, f"{Col.H}Footprint counts are being calculated and assigned to genes.{Col.E}")
+                self.gene_assignments = self.footprint_counts_to_genes(
+                    footprint_genome_assignment_list, chromosome_gene, positions_gene, verbose=self.verbose)
+                self.flanking_assignments = self.footprint_counts_to_genes(
+                    footprint_genome_assignment_list, chromosome_gene, positions_flanking, verbose=False)
                 self.offset = None
-            # Initiate footprint length distribution, which will be calculated in the following line.
-            # Note: length_distribution is for footprints that satisfy length constraint but not always align to a CDS.
-            self.length_distribution = None
-            print_verbose(verbose, f"{Col.H}Gene assignments are being calculated: {self.riboseq_group}{Col.E}")
-            temp_gene_assignments = self.calculate_gene_assignments(protein_genome_instance, gene_info_dictionary,
-                                                                    footprint_len=fl,
-                                                                    riboseq_assign_at=self.riboseq_assign_at,
-                                                                    calculate_distribution=True, verbose=self.verbose)
-            self.gene_assignments, self.flanking_assignments = temp_gene_assignments[0], temp_gene_assignments[1]
+
             # Calculate gene lengths as well, which can be used in different applications.
-            self.gene_lengths = {i: int(self.gene_assignments[i].shape[1]) for i in self.gene_list}
+            self.gene_lengths = {i: len(self.gene_assignments[i]) for i in self.gene_list}
             self.exclude_genes_calculate_stats(self.exclude_gene_list)  # Exclude genes, calculate RPM, RPKM etc.
+
             # Save the resulting object into a joblib file to load without calculating again in next runs.
             save_joblib(self, self.output_file_name, self.verbose)
+
 
     def exclude_genes_calculate_stats(self, exclude_gene_list: list):
         """
@@ -714,91 +731,178 @@ class RiboSeqAssignment:
             empty_matrix = np.empty(self.flanking_assignments[gene_id].shape)
             empty_matrix.fill(np.nan)
             self.flanking_assignments[gene_id] = empty_matrix
-        self.exclude_gene_list.extend(exclude_gene_list)  # Save which genes were excluded in the class variable
+            if gene_id not in self.exclude_gene_list:
+                self.exclude_gene_list.append(exclude_gene_list)  # Save which genes were excluded in the class variable
         # Calculate the total number of assignments for each gene and for all. Mainly, to use in RPM, RPKM calculations
         self.total_assigned_gene = {i: np.nansum(self.gene_assignments[i], axis=1) for i in self.gene_list}
         self.total_assigned = np.nansum(np.array(list(self.total_assigned_gene.values())), axis=0)
 
-    def calculate_offset(self, n_core, protein_genome_instance, gene_info_dictionary, verbose,
-                         footprint_len: Union[int, list] = None,
-                         abundance_threshold=0.025, periodicity_threshold=0.5):
-        window_len = 150
-        # First calculate the length
-        print_verbose(verbose, "Offset will be calculated by the program.\n"
-                               "Footprint length distribution is being calculated.")
-        length_dist = [self.footprint_assignment(sam_path, riboseq_assign_at=0, verbose=verbose, only_dist=True,
-                                                 calculate_distribution=True, footprint_len=footprint_len)
-                       for sam_path in self.sam_paths]
-        # Calculate total assignment for each replicate separately
-        total_assigned = [sum(i.values()) for i in length_dist]
-        # Calculate probability for each footprint length separately for each replicates
-        pros = [{k: i[k] / total_assigned[ind] for k in i.keys()} for ind, i in enumerate(length_dist)]
-        # Filter the probabilities based on a threshold
+    def calculate_length_distribution(self, footprint_asg_reps):
+        result = list()
+        for replicate in footprint_asg_reps:
+            replicate_distribution = dict()
+            for chromosome in replicate:
+                lengths, counts = np.unique(replicate[chromosome][:,1], return_counts=True)
+                for ind, the_len in enumerate(lengths):
+                    replicate_distribution[the_len] = replicate_distribution.get(the_len, 0) + counts[ind]
+            result.append(replicate_distribution)
+        return result
+
+    @staticmethod
+    def filter_by_footprint_abundance(length_distribution, abundance_threshold):
+        total_assigned = [sum(i.values()) for i in length_distribution]  # Calculate total assignment for each replicates
+        # Calculate probability for each footprint length separately for each replicates, and filter based on that.
+        pros = [{k: i[k] / total_assigned[ind] for k in i.keys()} for ind, i in enumerate(length_distribution)]
         pros_filtered = [{k: i[k] for k in i.keys() if i[k] > abundance_threshold} for ind, i in enumerate(pros)]
-        # Select the footprint lengths that satisfy threshold for at least one replicate
-        selected_lengths = sorted({k for i in pros_filtered for k in i})
-        # Run individual gene assignments for these footprint lengths, assign at position 0.
-        print_verbose(verbose, f"Gene assignments are being calculated for footprints "
-                               f"with length {', '.join(map(str, selected_lengths))}.")
-        ia = self.assign_certain_lengths(selected_lengths, n_core, gene_info_dictionary=gene_info_dictionary,
-                                         protein_genome_instance=protein_genome_instance, riboseq_assign_at=0)
-        # Calculate periodicity windows for around stop codon for each footprint length.
-        print_verbose(verbose, f"Periodicity windows around stop codon are being calculated.")
-        calks = {i: self.periodicity_window(origin="stop", window_length=window_len+33, gene_assignments=ia[i]["gene"],
-                                            flanking_assignments=ia[i]["flanking"]) for i in ia.keys()}
-        # Calculate 'weighted' averages of these windows.
-        caulk = {i: np.average(calks[i], axis=0, weights=total_assigned) for i in calks.keys()}
-        # Calculate auto-correlation with defined offset (3 as codon length). Spearman test for monotonic relationship.
-        periodicity_filtered = [stats.spearmanr(caulk[i][:100], caulk[i][3:100 + 3])[0] > periodicity_threshold
-                                for i in selected_lengths]
-        # TODO:BURASI ÇALIŞMIYOR!
-        # Select only footprints that show periodicity, for which the assignment offset will be calculated.
-        selected_lengths = list(itertools.compress(selected_lengths, periodicity_filtered))
-        print_verbose(verbose, f"Assignment offsets for selected footprints ({', '.join(map(str, selected_lengths))}) "
-                               f"are being calculated.")
-        # For each length satisfying abundance and periodicity constraints.
-        offset = dict()
-        for sl in selected_lengths:
-            k = caulk[sl]  # Get the weighted average of the window with this length
+        return sorted({k for i in pros_filtered for k in i})
+
+    def _calculate_offset_helper(self, footprint_asg_lst, chromosome_gene,
+                                 positions_gene, positions_flanking,
+                                 f5, f3, footprint_len):
+
+        # Assumption: when stop codon is at a-site of the ribosome, the read intensity will be 'median_threshold'
+        # higher than median. If the offset is not deterministic, we will see a series of peaks whose instensity will
+        # be again "median_threshold" more than median at that frame.
+
+        median_threshold = 2
+        min_rpkm = 5  # [6416960., 2997004., 2069252.] -> [4239574., 2071105., 1485493.]
+
+        cks = 15 # should be multiple of three, and an odd number
+        left_bias = 9  # should be multiple of three
+        right_bias = cks - 3 - left_bias  # should be multiple of three
+
+
+        from_cds = 180
+        window_len = f3 + from_cds
+        tac = f5 - self.f5
+
+        k = self.footprint_counts_to_genes(footprint_asg_lst, chromosome_gene, positions_gene,
+                                           footprint_len=footprint_len, frame=None, verbose=False)
+        l = self.footprint_counts_to_genes(footprint_asg_lst, chromosome_gene, positions_flanking,
+                                           footprint_len=footprint_len, frame=None, verbose=False)
+        # Get the metagene profile around stop position.
+        tr = self.metagene_at_ends("stop", window_len, min_rpkm, f5, f3, gene_assignments=k, flanking_assignments=l)
+
+        # Initialize the resulting dictionaries with zero values for all.
+        result_k, result_l, offsets = dict(), dict(), list()
+        for gene_id in self.gene_list:
+            result_k[gene_id] = np.zeros((len(footprint_asg_lst), len(positions_gene[gene_id])))
+            result_l[gene_id] = np.zeros((len(footprint_asg_lst), self.f5 + self.f3))
+            if gene_id in self.exclude_gene_list:
+                result_k[gene_id][result_k[gene_id] == 0] = np.nan
+                result_l[gene_id][result_l[gene_id] == 0] = np.nan
+
+        for replicate in range(len(footprint_asg_lst)):  # Calculate the offset separately for each replicate.
+            t = tr[replicate]
+
+            # Find most possible stop codon:
             # Sum the three consecutive elements, for three frames (shifted by 1 nt).
-            v = np.vstack([np.add.reduceat(m, np.arange(0, len(k) - 3, 3)) for m in [k[0:-3], k[1:-2], k[2:-1]]])
+            v = np.vstack([np.add.reduceat(m, np.arange(0, len(t) - 3, 3)) for m in [t[0:-3], t[1:-2], t[2:-1]]])
+            #print(f"\n\n{footprint_len}\n\n{np.nanmedian(v, axis=1).reshape(v.shape[0], 1)}\n\n\n")
             m = v / np.nanmedian(v, axis=1).reshape(v.shape[0], 1)  # Normalize the rows by the median value.
-            # Determine the positions where the sum is at least 2.5 more than
-            a, b = np.where(m > 2.5)
-            if len(a) < 1:  # If there is no triple nt whose sum is 2.5 times more than the median.
-                continue  # Consider this footprint having no peak at stop codon, discard.
+            # Determine the positions where the sum is at least 'median_threshold' more than the median
+            a, b = np.where(m > median_threshold)
+            if len(a) < 1:  # If there is no triple nt whose sum is 'median_threshold' times more than the median.
+                # Consider this footprint length having no peak at stop codon, discard.
+                continue
             # If there is more than one peak, get the right most peak, since we expect to see nothing after stop codon.
             au, bu = np.unique(a), [sorted(b[a == i])[-1] for i in np.unique(a)]
             ac, bc = au[v[au, bu].argmax()], bu[v[au, bu].argmax()]  # Get the values to construct the position formula.
             # ac is frame, bc is position for triple sum. [ac + bc * 3, ac + bc * 3 + 2] -> Stop codon positions.
             # window_len = ac + bc * 3 + k, where k is offset from 5' end.
-            offset[sl] = window_len - ac - bc * 3
-        # A perfect footprint can show different periodicity, [1, 0.1, 0.1] or [0.7, 0.3, 1] etc.
 
-        del ia, calks, caulk, length_dist
-        return offset
+            w = t[ac + bc * 3 - left_bias: ac + bc * 3 + 3 + right_bias]  # 21 codon wide window
+            t_stats = {i: np.median(t[:ac + bc * 3 - 3][i::3]) for i in range(3)}
 
-    def calculate_gene_assignments(self, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
-                                   riboseq_assign_at: Union[int, str], footprint_len: Union[int, list] = None,
-                                   calculate_distribution: bool = True,
-                                   verbose: bool = True):
-        """
-        Main method to calculate the assignments, which orchestrates the gene assignment by calling class methods and
-        linking the outputs to determine the gene assignment.
-        :param protein_genome_instance: An instance of ProteinGenome class
-        :param gene_info_dictionary: Output of gene_class_dict_generate() function
-        :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at.
-        :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
-        :param calculate_distribution: If True, calculated footprint length distributions will be saved.
-        :param verbose: If True, it will print to stdout about the process computer currently calculates.
-        :return: Creates a class variable called gene_assignments, which is a dictionary.
-        """
-        # Get the mapping from chromosomes to list of genes that they carry.
-        print_verbose(verbose, f"{Col.H}Genes are allocated to chromosomes.{Col.E}")
-        chromosome_gene = self.chromosomes_genes_matcher(gene_info_dictionary, self.gene_list)
+            frame_shift = dict()
+            for i in range(3):  # for each frame in stop_codon_window (not necessarily the frame of the gene!)
+                frame_of_gene = (ac + i) % 3
+                fw = w[i::3] / t_stats[frame_of_gene]
+                fa = np.where(fw > median_threshold)
+                if len(fa) < 1:
+                    frame_shift[frame_of_gene] = np.nan
+                    continue
+                else:
+                    fw_as, fw_s = np.argsort(fw), np.sort(fw)
+                    if len(fw_s) == 1 or fw_s[-1] > fw_s[-2] * 1.5:
+                        frame_shift[frame_of_gene] = (fw_as[-1] * 3 + i) + (ac + bc * 3 - left_bias) - from_cds
+                    # '-i' is to assign at all frames at the same position.
+                    else:
+                        frame_shift[frame_of_gene] = np.nan
+                # set most possible one as the "first" position of stop codon
+
+            for ind, gene_id in enumerate(self.gene_list):
+                if gene_id in self.exclude_gene_list:
+                    continue
+                lkl = np.hstack([l[gene_id][replicate, :f5], k[gene_id][replicate], l[gene_id][replicate, -f3:]])  # Merge
+                result = np.zeros(len(positions_gene[gene_id]) + self.f3 + self.f5)
+                for i in range(3):
+                    if np.isnan(frame_shift[i]):
+                        continue
+                    the_array = lkl.copy()
+                    for j in list({0, 1, 2} - {i}):
+                        the_array[j::3] = 0
+                    result += the_array[tac + frame_shift[i]: - tac + frame_shift[i]]
+                result_k[gene_id][replicate] = result[self.f5: -self.f3]
+                result[self.f5: -self.f3] = np.nan
+                result_l[gene_id][replicate] = result[~np.isnan(result)]
+
+            offsets.append(frame_shift)
+        return result_k, result_l, offsets
+
+    def calculate_offset(self, n_core, chromosome_gene, protein_genome_instance, gene_info_dictionary,
+                         footprint_len: Union[int, list] = None,
+                         abundance_threshold=0.01, verbose: bool = True):
+
+        f5_initial, f3_initial = 120, 123
 
         # Get array of genomic positions for all genes, create a dictionary out of it.
-        print_verbose(verbose, f"{Col.H}CDS ranges of genes are being calculated.{Col.E}")
+        positions_gene, positions_flanking = self.create_positions_genome(
+            protein_genome_instance, gene_info_dictionary, f5_initial, f3_initial)
+        # Run the method to calculate assignments.
+
+        # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
+        print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
+        footprint_asg_lst = [self.footprint_assignment(
+            sam_path, riboseq_assign_at=-1, split_by_length=True, calculate_distribution=False,
+            footprint_len=footprint_len, verbose=verbose, only_dist=False)
+            for sam_path in self.sam_paths]
+        self.length_distribution = self.calculate_length_distribution(footprint_asg_lst)  # Length distribution
+        selected_lengths = self.filter_by_footprint_abundance(self.length_distribution, abundance_threshold)
+
+        # Run individual gene assignments for these footprint lengths, assign at position -1,
+        print_verbose(verbose, f"Gene assignments are being calculated for footprints "
+                               f"with length {', '.join(map(str, selected_lengths))}.")
+        ga_lol = partial(self._calculate_offset_helper, footprint_asg_lst, chromosome_gene,
+                         positions_gene, positions_flanking, f5_initial, f3_initial)
+
+        with closing(multiprocessing.Pool(n_core)) as executor:
+            result_temp = executor.map(ga_lol, selected_lengths)
+
+        offsets = {i: r[2] for r, i in zip(result_temp, selected_lengths)}
+
+        gene_assignments, flanking_assignments = dict(), dict()
+        max_possible = 2 ** 16 - 1  # Maximum assignment to a single nucleotide position; as np.uint16 is used.
+        for gene_id in self.gene_list:
+            gene_assignments[gene_id] = np.zeros((len(footprint_asg_lst), len(positions_gene[gene_id])))
+            flanking_assignments[gene_id] = np.zeros((len(footprint_asg_lst), self.f5 + self.f3))
+            if gene_id in self.exclude_gene_list:
+                gene_assignments[gene_id][gene_assignments[gene_id] == 0] = np.nan
+                flanking_assignments[gene_id][flanking_assignments[gene_id] == 0] = np.nan
+            else:
+                for r in result_temp:
+                    gene_assignments[gene_id] += r[0][gene_id]
+                    flanking_assignments[gene_id] += r[1][gene_id]
+                assert np.max(gene_assignments[gene_id]) <= max_possible
+                assert np.max(flanking_assignments[gene_id]) <= max_possible
+                gene_assignments[gene_id] = gene_assignments[gene_id].astype(np.uint16)
+                flanking_assignments[gene_id] = flanking_assignments[gene_id].astype(np.uint16)
+
+        return gene_assignments, flanking_assignments, offsets
+
+    def create_positions_genome(self, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                                f5: int, f3: int):
+        # Get array of genomic positions for all genes, create a dictionary out of it.
         if self.riboseq_assign_to == "gene":  # For all CDS of a given gene, sorts and merges them
             positions_gene = {gene_id: gene_entire_cds(protein_genome_instance, gene_info_dictionary, gene_id,
                                                        make_array=True) for gene_id in self.gene_list}
@@ -807,44 +911,23 @@ class RiboSeqAssignment:
                                                            make_array=True) for gene_id in self.gene_list}
         else:  # For now, there is only two methods for CDS selection.
             raise AssertionError("'riboseq_assign_to' variable must be either 'gene' or 'best_transcript'.")
+
         # Calculate positions_flanking to get the dictionary for flanking regions
-        # Initialize a dict & Define counts of extra nt from each end.
-        f5, f3, positions_flanking = 30, 33, dict()
+        positions_flanking = dict()  # Initialize a dict
         for gene_id in positions_gene:  # Use the same genes which is used for gene assignment
-            fp, lp = positions_gene[gene_id][0], positions_gene[gene_id][
-                -1]  # Get first and last positions
+            fp, lp = positions_gene[gene_id][0], positions_gene[gene_id][-1]  # Get first and last positions
             ff = 1 if fp < lp else -1  # Get the orientation of the genome positions
             near_start, near_end = np.arange(fp - f5 * ff, fp, ff), np.arange(lp + 1 * ff, lp + (f3 + 1) * ff, ff)
             positions_flanking[gene_id] = np.concatenate([near_start, near_end])
         # Resulting dictionary always follows 5'UTR, (no CDS), stop_codon,  3'UTR.
 
-        # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
-        print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
-        resulting_dicts = [self.footprint_assignment(sam_path, riboseq_assign_at, calculate_distribution,
-                                                     footprint_len=footprint_len, verbose=verbose, only_dist=False)
-                           for sam_path in self.sam_paths]
-        footprint_genome_assignment_list, footprint_length_distribution_list = list(map(list, zip(*resulting_dicts)))
-        # Save the calculations to a object variable if calculate_distribution is True.
-        if calculate_distribution:
-            self.length_distribution = footprint_length_distribution_list
+        return positions_gene, positions_flanking
 
-        # Assign footprints to gene positions by calling footprint_counts_to_genes method.
-        print_verbose(verbose, f"{Col.H}Footprint counts are being calculated and assigned to genes.{Col.E}")
-        gene_assignment = self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
-                                                         positions_gene, verbose=verbose)
-        flanking_assignment = self.footprint_counts_to_genes(footprint_genome_assignment_list, chromosome_gene,
-                                                             positions_flanking, verbose=verbose)
-        return gene_assignment, flanking_assignment
-
-    def periodicity_window(self, origin: str, window_length: int, min_rpkm: int = 1,
-                           gene_assignments: dict = None, flanking_assignments: dict = None) -> np.ndarray:
+    def metagene_at_ends(self, origin: str, window_length: int, min_rpkm: int, f5: int, f3: int,
+                         gene_assignments: dict, flanking_assignments: dict) -> np.ndarray:
         """
         Calculates meta-gene profile for translation start or stop sites, which is particularly useful to see
-        the characteristic periodicity of ribosome sequencing experiments. Since this method is primarily used in
-        testing, such as investigating the effect of different footprint lengths, 'gene_assignments' variable was not
-        set to 'self.gene_assignments'. As a consequence, calculations in calculate_gene_assignments method has to be
-        made again. Note that, if the periodicity of more than one footprint length is of interest, the
-        'gene_assignments' dictionaries which are the output of 'assign_for_defined_footprint_lengths' method
+        the characteristic periodicity of ribosome sequencing experiments.
         :param origin: Either 'start' or 'stop' to define the origin of the profile
         :param window_length: Indicates how much nucleotide is of interest
         :param min_rpkm: RPKM threshold to take genes into account for calculation of the profile.
@@ -852,41 +935,30 @@ class RiboSeqAssignment:
         :param flanking_assignments: Flanking assignment dictionary, output of footprint_counts_to_genes
         :return: Average normalized read density for selected parameters.
         """
-        assert origin in ["start", "stop"]  # Make sure origin is defined properly.
-        # If assignment dictionaries are not given, just get the object variables
-        if not gene_assignments or not flanking_assignments:
-            gene_assignments = self.gene_assignments
-            flanking_assignments = self.flanking_assignments
-            total_assigned_gene = self.total_assigned_gene
-            total_assigned = self.total_assigned
-        else:  # Else start with filtering genes in exclude_gene_list
-            for gene_id in self.exclude_gene_list:  # For genes in the list
-                empty_matrix = np.empty(gene_assignments[gene_id].shape)  # Create an empty array with the same shape
-                empty_matrix.fill(np.nan)  # Fill the array with np.nan variables
-                gene_assignments[gene_id] = empty_matrix  # Assign the empty array to the gene
-                # Apply the same thing for flanking_assignments
-                empty_matrix = np.empty(flanking_assignments[gene_id].shape)
-                empty_matrix.fill(np.nan)
-                flanking_assignments[gene_id] = empty_matrix
-            # Calculate the total number of assignments for each gene and for all. To use in RPM, RPKM calculations
-            total_assigned_gene = {i: np.nansum(gene_assignments[i], axis=1) for i in self.gene_list}
-            total_assigned = np.nansum(np.array(list(total_assigned_gene.values())), axis=0)
-
-        # Create zero lists with the length of window_length
         dim = len(self.sam_paths)
         small_float = 1e-24
+
+        # Calculate the total number of assignments for each gene and for all. To use in RPM, RPKM calculations
+        total_assigned_gene = {i: np.nansum(gene_assignments[i], axis=1) for i in self.gene_list}
+        total_assigned = np.nansum(np.array(list(total_assigned_gene.values())), axis=0).reshape(1,dim)
+
+        # Create zero lists with the length of window_length
         the_sum, the_counts = np.zeros((dim, window_length)), np.zeros((dim, window_length))
+
         for gene_id in self.gene_list:  # For all genes in the gene_list
-            rpm_pos_gene = (gene_assignments[gene_id].T / total_assigned * 1e6).T
-            rpm_pos_flan = (flanking_assignments[gene_id].T / total_assigned * 1e6).T
-            gene_rpkm = total_assigned_gene[gene_id] / total_assigned * 1e9 / rpm_pos_flan.shape[1]
-            if np.isnan(rpm_pos_gene[0, 0]):  # For excluded genes: np.nan values will distort the calculation
-                continue  # Skip them. Note: np.nan can only be found for excluded genes.
-            rpm_positions = np.hstack([rpm_pos_flan[:, :30], rpm_pos_gene, rpm_pos_flan[:, -33:]])  # Merge
-            # If total RPM is zero, following division will be np.inf. As we already filter out based on RPKM, the zero
-            # values are replaced with a fairly small floating number.
-            total_rpm = np.sum(rpm_positions, axis=1).reshape(dim, 1)
+            if gene_id in self.exclude_gene_list:  # For excluded genes: np.nan values will distort the calculation
+                continue  # Skip them
+            rpm_pos_gene = (gene_assignments[gene_id] / total_assigned.T * 1e6)
+            rpm_pos_flan = (flanking_assignments[gene_id] / total_assigned.T * 1e6)
+            gene_rpkm = total_assigned_gene[gene_id] / total_assigned * 1e9 / rpm_pos_gene.shape[1]
+
+            rpm_positions = np.hstack([rpm_pos_flan[:, :f5], rpm_pos_gene, rpm_pos_flan[:, -f3:]])  # Merge
+            # If total RPM is zero, division for calculation of norm_rpm would be np.inf. As we already filter out
+            # based on RPKM, RPM of the zero will be also filtered out. For here, zeros are replaced with a fairly small
+            # number to suppress the warning message.
+            total_rpm = np.nansum(rpm_positions, axis=1).reshape(dim, 1)
             total_rpm[total_rpm == 0] = small_float
+
             if origin == "start":
                 norm_rpm = (rpm_positions / total_rpm)[:, :window_length]
                 # For each replicate calculate if the replicate rpkm value for a gene is above threshold
@@ -895,11 +967,13 @@ class RiboSeqAssignment:
                 the_sum[:, :norm_rpm.shape[1]] += norm_rpm * filter_rpkm
                 # Take into account the number of genes contributed to window positions. So, get the counts.
                 the_counts[:, :norm_rpm.shape[1]] += np.ones((dim, norm_rpm.shape[1])) * filter_rpkm
-            else:  # The same procedure but for 'stop' origin
+            elif origin == "stop":  # The same procedure but for 'stop' origin
                 norm_rpm = (rpm_positions / total_rpm)[:, -window_length:]
                 filter_rpkm = np.repeat((gene_rpkm > min_rpkm).reshape(dim, 1), norm_rpm.shape[1], axis=1).astype(int)
                 the_sum[:, -norm_rpm.shape[1]:] += norm_rpm * filter_rpkm
                 the_counts[:, -norm_rpm.shape[1]:] += np.ones((dim, norm_rpm.shape[1])) * filter_rpkm
+            else:
+                raise ValueError
 
         return the_sum / the_counts  # Return the result as np.ndarray
 
@@ -909,10 +983,10 @@ class RiboSeqAssignment:
         plt.figure(figsize=(18, 4))
         for ind in range(len(self.sam_paths)):
             if origin == "start":
-                plt.plot(np.arange(-30, len(periodicity_array[ind]) - 30), periodicity_array[ind], color=palette[ind],
+                plt.plot(np.arange(-self.f5, len(periodicity_array[ind]) - self.f5), periodicity_array[ind], color=palette[ind],
                          marker=".", label=os.path.basename(self.sam_paths[ind]))
             else:  # origin == "stop":
-                plt.plot(np.arange(-len(periodicity_array[ind]) + 33, 33), periodicity_array[ind], color=palette[ind],
+                plt.plot(np.arange(-len(periodicity_array[ind]) + self.f3, self.f3), periodicity_array[ind], color=palette[ind],
                          marker=".", label=os.path.basename(self.sam_paths[ind]))
         plt.title(title, fontweight="bold", y=1.05)
         plt.ylabel(r"Average normalized read density ($\times10^{-3}$)")
@@ -960,37 +1034,6 @@ class RiboSeqAssignment:
         plt.gca().spines["right"].set_visible(False)
         plt.show()
 
-    def _assign_certain_lengths_helper(self, x, y, z, t):
-        return [self.calculate_gene_assignments(y, z, footprint_len=i, verbose=False, riboseq_assign_at=t,
-                                                calculate_distribution=False) for i in x]
-
-    def assign_certain_lengths(self, footprint_lengths, n_core, riboseq_assign_at,
-                               protein_genome_instance, gene_info_dictionary):
-        """
-        oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
-        oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
-        oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
-        oOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOooOoOoOoOoOoOoOoOo
-        :param footprint_lengths:
-        :param n_core:
-        :param riboseq_assign_at:
-        :param protein_genome_instance:
-        :param gene_info_dictionary:
-        :return:
-        """
-        estimated_max_memory_consumption_of_a_single_run = 4e9
-        if psutil.virtual_memory().free / estimated_max_memory_consumption_of_a_single_run < len(footprint_lengths):
-            raise MemoryError
-        ga_lol = partial(self._assign_certain_lengths_helper,
-                         y=protein_genome_instance, z=gene_info_dictionary, t=riboseq_assign_at)
-        chunk_size = math.ceil(len(footprint_lengths) / n_core)
-        gene_list_chunks = [footprint_lengths[i: i + chunk_size] for i in range(0, len(footprint_lengths), chunk_size)]
-        executor = multiprocessing.Pool(len(gene_list_chunks))
-        result = executor.map(ga_lol, gene_list_chunks)
-        executor.terminate()
-        executor.join()
-        result = [{"gene": j[0], "flanking": j[1]} for i in result for j in i]  # Flatten
-        return dict(zip(footprint_lengths, result))
 
     @staticmethod
     def chromosomes_genes_matcher(gene_info_dictionary: dict, gene_list: list):
@@ -1007,7 +1050,7 @@ class RiboSeqAssignment:
             chromosomes[contig] = chromosomes.get(contig, []) + [gene_id]
         return chromosomes  # Return the resulting filled dictionary
 
-    def footprint_assignment(self, sam_path: str, riboseq_assign_at: Union[int, str],
+    def footprint_assignment(self, sam_path: str, riboseq_assign_at: int, split_by_length: bool,
                              calculate_distribution: bool, only_dist: bool = False, verbose: bool = False,
                              footprint_len: Union[int, list] = None) -> Union[dict, tuple]:
         """
@@ -1025,22 +1068,24 @@ class RiboSeqAssignment:
         """
 
         dist_single = dict()  # Initiate to calculate length distribution for given SAM
+        assigned_positions = dict()  # Initialize dictionary with keys composed of chromosome names
+
         if verbose:  # Count the number of lines in SAM file to be able to print a progress bar.
             with pysam.AlignmentFile(sam_path, "r") as sam_handle:  # Open SAM file with pysam library
                 iteration = sam_handle.count()  # Call count method to find out total read count.
 
         counter = 0  # Initiate a counter to report the number of skipped footprints if exists.
         counter_footprint_length = 0  # To report the number of skipped footprints if footprint_len is not None.
+        ache = "0123456789DIMNS"  # Allowed characters in cigar string.
         with pysam.AlignmentFile(sam_path, "r") as sam_handle:  # Open SAM file with pysam library
             sam_iterator = sam_handle.fetch()  # Get the iterator to iterate through reads in for loop
-            assigned_positions = dict()  # Initialize dictionary with keys composed of chromosome names
 
             for ind, e in enumerate(sam_iterator):  # Iterate through the entries
                 # Print out the current process to stdout as a progress bar.
                 if verbose and (ind % 1000 == 0 or ind == iteration - 1):  # Print it in meaningful intervals
                     progress_bar(ind, iteration - 1, verbose=verbose)
                 # This assertion is to make sure below if-else statement works perfectly well.
-                assert sum(e.get_cigar_stats()[1][5:]) == 0, "Make sure cigar string composed of D, I, M, N, S only!"
+                assert all([i in ache for i in e.cigarstring]), "Cigar string must be composed of D, I, M, N, S only!"
 
                 # Other than 'D', get_reference_positions method perfectly works. See the following link to understand
                 # why we should keep 'D': https://github.com/NBISweden/GAAS/blob/master/annotation/knowledge/cigar.md
@@ -1066,21 +1111,16 @@ class RiboSeqAssignment:
                 if footprint_len and isinstance(footprint_len, list) and len(reference_positions) not in footprint_len:
                     counter_footprint_length += 1
                     continue
+
                 # Fill up the dictionary for footprint length distribution
                 if calculate_distribution:
                     dist_single[len(reference_positions)] = dist_single.get(len(reference_positions), 0) + 1
                 if only_dist and calculate_distribution:  # Skip remaining if only distribution is of interest
                     continue
 
-                if isinstance(riboseq_assign_at, int):
-                    # Calculate the assignment position for footprints in reverse or forward strand. Note that the
-                    # method normally accepts the assignment for forward strand.
-                    assignment_forward, assignment_reverse = riboseq_assign_at, -riboseq_assign_at - 1
-                elif isinstance(riboseq_assign_at, str) and riboseq_assign_at == "auto":
-                    assignment_position = self.offset[len(reference_positions)]
-                    assignment_forward, assignment_reverse = assignment_position, -assignment_position - 1
-                else:
-                    raise ValueError
+                # Calculate the assignment position for footprints in reverse or forward strand. Note that the
+                # method normally accepts the assignment for forward strand.
+                assignment_forward, assignment_reverse = riboseq_assign_at, -riboseq_assign_at - 1
 
                 try:
                     if e.is_reverse:  # If reverse use the assigned position calculated in the beginning of the method.
@@ -1090,6 +1130,9 @@ class RiboSeqAssignment:
                 except IndexError:  # If list index out of range.
                     counter += 1  # This is the case if footprint is shorter than desired assigned position.
                     continue  # Skip this footprint.
+
+                if split_by_length:
+                    assigned_nucleotide = [assigned_nucleotide, len(reference_positions)]
 
                 if e.reference_name not in assigned_positions:  # If the chromosome is not present in the dictionary
                     assigned_positions[e.reference_name] = [assigned_nucleotide]
@@ -1107,70 +1150,79 @@ class RiboSeqAssignment:
 
         # After assignment ends for each entry in the chromosome dictionary
         for chromosome in assigned_positions:
-            assigned_positions[chromosome] = np.sort(np.array(assigned_positions[chromosome]))  # Make np.array and sort
+            assigned_positions[chromosome] = np.array(assigned_positions[chromosome])  # Make np.array and sort
 
-        return assigned_positions, dist_single  # Return the filled dictionaries
+        if calculate_distribution:
+            return assigned_positions, dist_single  # Return the filled dictionaries
+        else:
+            return assigned_positions
 
-    @staticmethod
-    def footprint_counts_to_genes(footprint_genome_assignment_list: list, chromosome_gene_map: dict,
-                                  positions_gene_map: dict, verbose: bool = False) -> dict:
+    def footprint_counts_to_genes(self, footprint_genome_assn_lst: list, chromosome_gene_map: dict,
+                                  positions_map: dict,
+                                  footprint_len: int = None, frame: set = None,
+                                  verbose: bool = False) -> dict:
         """
         Assigns the footprints to genes. Output shows how many footprints are assigned at each position of a gene.
-        :param footprint_genome_assignment_list: List of outputs of footprint_assignment function
+        :param footprint_genome_assn_lst: List of outputs of footprint_assignment function
         :param chromosome_gene_map: Output of chromosomes_genes_matcher function
-        :param positions_gene_map: Output of cds_ranges_to_array function
+        :param positions_map: Output of cds_ranges_to_array function
         :param verbose: If True, it will print to stdout about the process computer currently calculates.
         :return: Dictionary mapping gene_id to numpy array (with the same length of gene), which compose of integers.
         """
-        max_possible = 2 ** 32  # Maximum assignment to a single nucleotide position. Since np.int32 is used.
         gene_footprint_assignment = dict()  # Initialize a dictionary to fill up
 
+        for gene_id in self.gene_list:
+            # Create an empty matrix to fill with raw counts, which originate from different replicates
+            gene_footprint_assignment[gene_id] = np.zeros((len(footprint_genome_assn_lst), len(positions_map[gene_id])))
+
         # For each replicate do the same procedure
-        for ind_assignment, footprint_genome_assignment in enumerate(footprint_genome_assignment_list):
+        for ind_assignment, footprint_genome_assignment in enumerate(footprint_genome_assn_lst):
             for ind, chr_name in enumerate(footprint_genome_assignment):  # For each chromosome
                 # Print out the current process to stdout as a progress bar.
                 progress_bar(ind, len(footprint_genome_assignment) - 1, verbose=verbose)
                 # Get all genomic coordinates assigned to a footprint
                 chr_pos_footprints = footprint_genome_assignment[chr_name]
                 # Get the number of unique elements and the counts of these unique elements
-                element_unique, element_count = np.unique(chr_pos_footprints, return_counts=True)
+                element_unique, element_count = np.unique(chr_pos_footprints, return_counts=True, axis=0)
                 # Create a dictionary from this info, mapping genomic position with the number of footprints assigned.
-                footprints_counts = dict(zip(element_unique, element_count))
 
-                try:
-                    gene_id_list = chromosome_gene_map[chr_name]  # For each gene in the same chromosome
-                except KeyError:
-                    # Footprints, which are not mapped to a contig that has a gene on it, are excluded.
-                    continue
+                if not footprint_len:
+                    # If no footprint_len is defined, chr_pos_footprints array must be in one dimensional, obtained by
+                    # assignment method specifying split_by_length=False.
+                    footprints_counts = dict(zip(element_unique, element_count))
+                else:
+                    # If footprint_len is defined, chr_pos_footprints array must be in two dimensional, obtained by
+                    # assignment method specifying split_by_length=True.
+                    temp_fc = np.hstack((element_unique, element_count.reshape(len(element_count), 1))).T
+                    # Filter footprints by size, and discard the length row as they all the same
+                    temp_fc = temp_fc[[0, 2], :][:, temp_fc[1] == footprint_len]
+                    footprints_counts = dict(zip(temp_fc[0], temp_fc[1]))
 
-                for gene_id in gene_id_list:
-                    pos_genes = positions_gene_map[gene_id]  # Get the genomic positions of the gene
-                    # For each position in the gene, look at the footprints_counts, get the number if found, 0 otherwise
+                for gene_id in chromosome_gene_map.get(chr_name, []):  # For each gene in the same chromosome
+                    pos_genes = positions_map[gene_id]  # Get the genomic positions of the gene
+                    # For each position, look at the footprints_counts, get the number if found, 0 otherwise
                     temp_assignments = np.array([footprints_counts.get(i, 0) for i in pos_genes])
-                    # Create an empty matrix to fill with raw counts, which originate from different replicates
-                    if gene_id not in gene_footprint_assignment:
-                        gene_footprint_assignment[gene_id] = np.zeros((len(footprint_genome_assignment_list),
-                                                                       len(temp_assignments)),)
+                    # Remove the count information from other frames, if frame is defined.
+                    if frame is not None:
+                        for frame_to_delete in list({0, 1, 2} - frame):
+                            temp_assignments[frame_to_delete::3] = 0
+
                     # Make sure the line is not filled previously
                     assert np.max(gene_footprint_assignment[gene_id][ind_assignment]) == 0, "Error: Multiple genes"
                     gene_footprint_assignment[gene_id][ind_assignment] = temp_assignments  # Save the calculation
 
-        # Convert list of np.arrays to np.ndarray. Also set up the data type as np.int32
-        for gene_id in gene_footprint_assignment:
-            # Make sure assigned positions does not exceed max possible number for np.int32
-            assert np.max(gene_footprint_assignment[gene_id]) < max_possible, "Exceeded np.int32"
-            gene_footprint_assignment[gene_id] = gene_footprint_assignment[gene_id].astype(np.int32)
-
-        # There are some genes that are not annotated in any of the chromosomes or annotated in the chromosomes
-        # in which there is no footprint.
-        non_covered_genes = positions_gene_map.keys() - gene_footprint_assignment.keys()  # Get the gene names
-        for gene_id in non_covered_genes:
-            empty_matrix = np.zeros((len(footprint_genome_assignment_list),
-                                     len(positions_gene_map[gene_id])), dtype=np.int32)  # Create an zero matrix
-            assert gene_id not in gene_footprint_assignment, "Error in non_covered_genes"  # To make sure
-            gene_footprint_assignment[gene_id] = empty_matrix  # No footprint was detected for these genes.
+        max_possible = 2 ** 16 - 1  # Maximum assignment to a single nucleotide position; as np.uint16 is used.
+        for gene_id in self.gene_list:
+            if gene_id in self.exclude_gene_list:  # For genes in the list
+                empty_matrix = np.empty(gene_footprint_assignment[gene_id].shape)  # An empty array with the same shape
+                empty_matrix.fill(np.nan)  # Fill the array with np.nan variables
+                gene_footprint_assignment[gene_id] = empty_matrix  # Assign the empty array to the gene
+            else:
+                assert np.max(gene_footprint_assignment[gene_id]) <= max_possible
+                gene_footprint_assignment[gene_id] = gene_footprint_assignment[gene_id].astype(np.uint16)
 
         return gene_footprint_assignment  # Return filled dictionary
+
 
     def calculate_rpm_genes(self, gene_id: str, average: bool = True) -> Union[np.float64, np.ndarray]:
         """
@@ -1212,7 +1264,8 @@ class RiboSeqExperiment:
     def __init__(self, temp_repo_dir, sam_paths_background: list, sam_paths_experiment: list, name_experiment: str,
                  riboseq_assign_at: int, riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
-                 exclude_genes: list = None, verbose=True, recalculate=False):
+                 exclude_genes: list = None, n_core: int = multiprocessing.cpu_count() - 2,
+                 verbose=True, recalculate=False):
 
         self.temp_repo_dir = temp_repo_dir
         self.sam_paths_background = sam_paths_background
@@ -1220,20 +1273,21 @@ class RiboSeqExperiment:
         self.name_experiment = name_experiment
         self.riboseq_assign_to = riboseq_assign_to
         self.riboseq_assign_at = riboseq_assign_at
-        self.exclude_genes = [] if not exclude_genes else exclude_genes
+        self.n_core = n_core
+        self.exclude_genes = exclude_genes
         self.verbose = verbose
         self.recalculate = recalculate
         self.gene_list = sorted(gene_info_dictionary.keys())
 
         self.background = RiboSeqAssignment(self.sam_paths_background, self.temp_repo_dir, self.riboseq_assign_at,
                                             self.riboseq_assign_to, name_experiment + "_background",
-                                            protein_genome_instance, gene_info_dictionary,
-                                            footprint_len=footprint_len_background,
+                                            protein_genome_instance, gene_info_dictionary, n_core=self.n_core,
+                                            footprint_len=footprint_len_background, exclude_genes=self.exclude_genes,
                                             recalculate = self.recalculate, verbose=self.verbose)
         self.experiment = RiboSeqAssignment(self.sam_paths_experiment, self.temp_repo_dir, self.riboseq_assign_at,
                                             self.riboseq_assign_to, name_experiment + "_experiment",
-                                            protein_genome_instance, gene_info_dictionary,
-                                            footprint_len=footprint_len_experiment,
+                                            protein_genome_instance, gene_info_dictionary, n_core=self.n_core,
+                                            footprint_len=footprint_len_experiment, exclude_genes=self.exclude_genes,
                                             recalculate=self.recalculate, verbose=self.verbose)
 
         if self.exclude_genes:
@@ -1398,28 +1452,78 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         except AssertionError:
             return np.array([])
 
-    def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background):
+    def stalling_peaks_inecik_5(self, gene_id, probability=0.02, min_rpkm_sixtymers=-1, min_rpkm_background=1):
+
+        try:
+            assert type(self.aux_var_inecik_5)
+            assert self.aux_var_inecik_5_params == (min_rpkm_sixtymers, min_rpkm_background)
+        except (AttributeError, AssertionError):
+            self.aux_var_inecik_5_params = (min_rpkm_sixtymers, min_rpkm_background)
+            aux_var_temp = list()
+            for exp_rpm_s in self.inecik_gene_iterator(None, None, min_rpkm_sixtymers, min_rpkm_background,
+                                                       smoothen=False):
+                aux_var_temp.extend(list(exp_rpm_s))
+            aux_var_temp = np.array(aux_var_temp)
+            aux_var_temp = aux_var_temp[aux_var_temp != 0]
+
+            params_additional = aux_var_temp.max()
+            aux_var_temp = -np.log(aux_var_temp / params_additional)
+            params = stats.fisk.fit(aux_var_temp)
+            #x_data_mock = np.linspace(aux_var_temp.min(), aux_var_temp.max(), 512)
+            #y_data_fit = stats.fisk.pdf(x_data_mock, *params)
+            #plt.hist(aux_var_temp, bins=512, density=True, alpha=0.5)
+            #plt.plot(x_data_mock, y_data_fit, color="black", linestyle='--')
+            #plt.show()
+            del aux_var_temp
+            self.aux_var_inecik_5 = (params, params_additional)
+        try:
+            exp_rpm_s = self.inecik_get_gene(gene_id, None, None, min_rpkm_sixtymers, min_rpkm_background, smoothen=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                log_calc = -np.log(exp_rpm_s / self.aux_var_inecik_5[1])
+                log_calc[log_calc == np.inf] = np.nan
+            props = stats.fisk.cdf(log_calc, *self.aux_var_inecik_5[0])  # because smaller values are higher peaks
+            return np.where(props < probability)
+        except AssertionError:
+            return np.array([])
+
+    # todo: 5 çalışmıyo,
+    #   plotting'i çalıştır
+    #   diğer tool'ları da kontrol et
+    #   her bir replicate için ayrı hesaplamalı!
+    #   sonra logo bulma işine gir
+
+
+    def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background, smoothen=True):
         exp_rpkm = self.experiment.calculate_rpkm_genes(gene_id)
         bac_rpkm = self.background.calculate_rpkm_genes(gene_id)
         exp_rpm_bs = self.experiment.calculate_rpm_positions(gene_id)
         assert exp_rpkm > min_rpkm_sixtymers and bac_rpkm > min_rpkm_background
-        assert len(exp_rpm_bs) > window_len
         rpm_gene = self.background.calculate_rpm_genes(gene_id)
-        exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene) + [0]
-        return np.array(exp_rpm_s)
+        if smoothen:
+            assert len(exp_rpm_bs) > window_len
+            exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene) + [0]
+            return np.array(exp_rpm_s)
+        else:
+            exp_rpm_s = exp_rpm_bs / rpm_gene
+            return exp_rpm_s
 
-    def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_background):
+    def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_background, smoothen=True):
         for gene_id in self.gene_list:
             try:
-                yield self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background)
+                yield self.inecik_get_gene(gene_id, window, window_len, min_rpkm_sixtymers,
+                                           min_rpkm_background, smoothen=smoothen)
             except AssertionError:
                 continue
 
-    def plot_result(self, gene_id, function, *args, **kwargs):
+    def plot_result(self, smoothen, gene_id, function, *args, **kwargs):
         total_exp = self.experiment.calculate_rpkm_genes(gene_id)
         total_tra = self.background.calculate_rpkm_genes(gene_id)
         rpm_tra = self.background.calculate_rpm_genes(gene_id)
-        arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / rpm_tra
+        if smoothen:
+            arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / rpm_tra
+        else:
+            arr = self.experiment.calculate_rpm_positions(gene_id) / rpm_tra
         peaks = function(gene_id, *args, **kwargs)
         # Plot
         fig, ax = plt.subplots(1, 1, figsize=(14, 4))
@@ -1480,7 +1584,7 @@ class RiboSeqCoco(RiboSeqExperiment):
                          verbose=verbose,
                          recalculate=recalculate)
 
-        self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_on_{self.riboseq_assign_to}_fitting_calculations.joblib")
+        self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_fitting_calculations.joblib")
         self.n_core = multiprocessing.cpu_count()
 
         try:
