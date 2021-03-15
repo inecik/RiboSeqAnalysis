@@ -30,8 +30,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from functools import partial
 from scipy.signal import find_peaks, peak_widths, peak_prominences
-from scipy.signal import deconvolve
-import psutil
 
 
 script_path_infrastructure = __file__
@@ -705,7 +703,7 @@ class RiboSeqAssignment:
                 self.offset = None
 
             # Calculate gene lengths as well, which can be used in different applications.
-            self.gene_lengths = {i: len(self.gene_assignments[i]) for i in self.gene_list}
+            self.gene_lengths = {i: self.gene_assignments[i].shape[1] for i in self.gene_list}
             self.exclude_genes_calculate_stats(self.exclude_gene_list)  # Exclude genes, calculate RPM, RPKM etc.
 
             # Save the resulting object into a joblib file to load without calculating again in next runs.
@@ -1483,16 +1481,12 @@ class RiboSeqSixtymers(RiboSeqExperiment):
                 log_calc = -np.log(exp_rpm_s / self.aux_var_inecik_5[1])
                 log_calc[log_calc == np.inf] = np.nan
             props = stats.fisk.cdf(log_calc, *self.aux_var_inecik_5[0])  # because smaller values are higher peaks
-            return np.where(props < probability)
+            return np.where(props < probability)[0]
         except AssertionError:
             return np.array([])
 
-    # todo: 5 çalışmıyo,
-    #   plotting'i çalıştır
-    #   diğer tool'ları da kontrol et
     #   her bir replicate için ayrı hesaplamalı!
     #   sonra logo bulma işine gir
-
 
     def inecik_get_gene(self, gene_id, window, window_len, min_rpkm_sixtymers, min_rpkm_background, smoothen=True):
         exp_rpkm = self.experiment.calculate_rpkm_genes(gene_id)
@@ -1531,9 +1525,11 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         ax.plot(arr, alpha=1, color="salmon")
         ax.scatter(peaks, [arr[p] for p in peaks], color="black", alpha=1, s=25)
         ax.set_ylim(0, arr.max() * 1.35)
-        ax.text(0.01, 0.99, f"{gene_id} / Index {self.gene_list.index(gene_id)}\nRPKMs: {round(total_exp, 2)} - {round(total_tra, 2)}",
+        ax.text(0.01, 0.99, f"{gene_id} / Index {self.gene_list.index(gene_id)}\n"
+                            f"RPKM Sixtymers: {round(total_exp, 2)}\n"
+                            f"RPKM Translatome: {round(total_tra, 2)}",
                       fontsize=6, transform=ax.transAxes, verticalalignment='top', horizontalalignment="left")
-        ax.text(0.99, 0.99, f"Max: {round(arr.max(), 5)}\nPeaks: {len(peaks)}", fontsize=6,
+        ax.text(0.99, 0.99, f"Max: {round(arr.max(), 5)}\nPeaks: {len(peaks[0])}", fontsize=6,
                       transform=ax.transAxes, verticalalignment='top', horizontalalignment="right")
         ax.axes.get_yaxis().set_visible(False)
         ax.tick_params(labelsize=6)
