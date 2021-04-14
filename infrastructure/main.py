@@ -602,11 +602,11 @@ class RiboSeqAssignment:
         5' end 1st position and '1' denotes to 5' end 2nd position. '-1' corresponds to 3' 1st position, '-2'
         corresponds to 3' 2nd position. If it is "auto", then offsets will be calculated by the instance method
         called calculate_offset.
-        :param riboseq_assign_to: There are 2 options for this: either "best_transcript" or "gene". One selects the
+        :param riboseq_assign_to: There are 2 options for this, either "best_transcript" or "gene". One selects the
         best transcript, which is determined by Gene class for this gene. The latter selects all CDS of a given gene,
         sorts and merges them. Using "gene" is not recommended as other parts of the pipeline is prepared for
         "best_transcript" but not for "gene" for now.
-        :param riboseq_group: Unique string to identify the RiboSeq experiment. e.g "cocoassembly_monosome"
+        :param riboseq_group: Unique string to identify the RiboSeq assignment. e.g "cocoassembly_monosome"
         :param protein_genome_instance: An instance of ProteinGenome class
         :param n_core: Number of computer cores to be used.
         :param footprint_len: Keeps only the footprint with designated length. If None, keeps all footprint lengths.
@@ -751,13 +751,17 @@ class RiboSeqAssignment:
                                  total_assigned: int, f5_initial: int, f3_initial: int, figure_dir: str,
                                  footprint_len: int) -> tuple:
         """
-        todo: comment here
+        Used in by the auto-offset-calculating-method of this class so that the process can be completed in multiple
+        cores at the same time for each footprint length separately.
         """
 
         aa = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
         fl = math.ceil(footprint_len / 3)  # Footprint length in amino acid
         min_rpkm = 1  # Ignore genes that has lower RPKM value of 1.
         palette = sns.color_palette("cubehelix", 3)
+        # Below line is not tested. It is designed to work for sixtymers with kernel size of 3 and for monomers with
+        # kernel size of 2. However, extensive testing is required.
+        kernel = [1, 1, 1] if footprint_len > 41 else [1, 1]  # Warning: "Why 41" should be investigated further!
 
         first_position_ignore = max(-7, math.floor(fl / 3) + 1 - fl)
         igr_ends = [first_position_ignore, -1]  # Check only relevant positions in the metafootprint profile
@@ -798,10 +802,10 @@ class RiboSeqAssignment:
                 # Calculate RPKM and make sure it is above min_rpkm defined above.
                 if np.sum(dt) / np.sum(total_assigned) * 1e9 / len(dt) > min_rpkm:
                     dt = dt / np.mean(dt)  # Normalization for positions takes place here
-                    for aa_position_temp, norm_count_at_position in enumerate(dt):  # Get position, intensity
+                    for nt_position, norm_count in enumerate(dt):  # Get position, intensity
                         # Calculate the amino acid position of the given nucleotide position.
-                        aa_position = math.floor(aa_position_temp / 3)
-                        if norm_count_at_position == 0 or aa_position < fl:
+                        aa_position = math.floor(nt_position / 3)
+                        if norm_count == 0 or aa_position - fl < 0:
                             # If the normalized intensity is 0 or aa position is smaller than max footprint length
                             continue
                         else:
@@ -812,7 +816,7 @@ class RiboSeqAssignment:
                             for i_fl in range(fl):  # For each position in footprint (as amino acids)
                                 try:
                                     # Increase the relevant position with normalized intensity
-                                    fill_matrix[i_fl, aa.index(fpca[i_fl])] += norm_count_at_position
+                                    fill_matrix[i_fl, aa.index(fpca[i_fl])] += norm_count
                                 except ValueError:
                                     pass  # Raises ValueError for non-conventional amino acids
             assert counter > 100, "Error in counter"
@@ -822,10 +826,10 @@ class RiboSeqAssignment:
             dfk_expected = pd.DataFrame([ProteinAnalysis(prot_expected).get_amino_acids_percent()] * fl)
             # Calculate KL divergence (entropy) for each position
             sonc = [stats.entropy(dfk_observed.iloc[i], dfk_expected.iloc[i]) for i in range(fl)]
-            # Get the sum of consecutive positions and find the maximum position in designated positions
-            max_kl_couple = np.argmax(np.convolve(sonc, [1, 1], mode="valid")[igr_ends[0]: igr_ends[1]])
-            a_site_position = (igr_ends[0] + max_kl_couple) * 3  # Get the a-site position
-            offsets[frm] = a_site_position  # Add to the dictionary to report
+            # Get the sum of consecutive positions (E-P-A positions) and find the maximum
+            max_kl_couple = np.argmax(np.convolve(sonc, kernel, mode="valid")[igr_ends[0]: igr_ends[1]])
+            a_site_pos = (igr_ends[0] + max_kl_couple) * 3  # Get the a-site position
+            offsets[frm] = a_site_pos  # Add to the dictionary to report
 
             plt.plot(sonc, color=palette[frm], marker=".", label=frm)
 
@@ -834,12 +838,13 @@ class RiboSeqAssignment:
                     # Combine flanking and CDS together into one array
                     merged = np.hstack([a_fla[gene_id][:, :f5_initial], a_cds[gene_id], a_fla[gene_id][:, f5_initial:]])
                     # Get a slice considering final f5, f3 values and the offset.
-                    merged = merged[:, f5_initial - self.f5 - a_site_position: self.f3 - f3_initial - a_site_position]
+                    merged = merged[:, f5_initial - self.f5 - a_site_pos - 1: self.f3 - f3_initial - a_site_pos - 1]
+                    # Note that '-1' because the footprints were initially assigned to -1 position.
                     result_k[gene_id] += merged[:, self.f5: -self.f3]  # Save the result
                     result_l[gene_id] += np.hstack([merged[:, :self.f5], merged[:, -self.f3:]])  # Save the result
 
         plt.title(f"Length {footprint_len}")
-        plt.legend(title='Replicates', bbox_to_anchor=(1, 1), loc='upper left')
+        plt.legend(title='Frames', bbox_to_anchor=(1, 1), loc='upper left')
         plt.tight_layout()
         plt.savefig(os.path.join(figure_dir, f"{footprint_len}.pdf"))
 
@@ -1386,23 +1391,26 @@ class RiboSeqExperiment:
                  exclude_genes: list = None, n_core: int = multiprocessing.cpu_count() - 2,
                  verbose=True, recalculate=False):
         """
-        # todo here and below
-        :param temp_repo_dir:
-        :param sam_paths_background:
-        :param sam_paths_experiment:
-        :param name_experiment:
-        :param riboseq_assign_at:
-        :param riboseq_assign_to:
-        :param protein_genome_instance:
-        :param gene_info_dictionary:
-        :param footprint_len_experiment:
-        :param footprint_len_background:
-        :param exclude_genes:
-        :param n_core:
-        :param verbose:
-        :param recalculate:
+        Init function.
+        :param temp_repo_dir: Full path directory where temporary files will be stored.
+        :param sam_paths_background: Absolute paths of SAM files, which are replicates of each other, for background
+        :param sam_paths_experiment: Absolute paths of SAM files, which are replicates of each other, for experiment
+        :param name_experiment: Unique string to identify the RiboSeq experiment.  e.g "cocoassembly", "sixtymers"
+        :param riboseq_assign_at: The position on the footprint where the footprint will be assigned at. '0' denotes to
+        5' end 1st position and '1' denotes to 5' end 2nd position. '-1' corresponds to 3' 1st position, '-2'
+        corresponds to 3' 2nd position. If it is "auto", then offsets will be calculated automatically. If a list of
+        two elements are given, the first element in the list is for background and the second is for the experiment.
+        :param riboseq_assign_to: There are 2 options for this, either "best_transcript" or "gene". One selects the
+        best transcript, which is determined by Gene class for this gene. "gene" is not supported fully yet.
+        :param protein_genome_instance: An instance of ProteinGenome class
+        :param gene_info_dictionary: Output of gene_class_dict_generate() function
+        :param footprint_len_experiment: Keeps only the footprint designated. If None, keeps all footprint lengths.
+        :param footprint_len_background: Keeps only the footprint designated. If None, keeps all footprint lengths.
+        :param exclude_genes: The Ensembl gene IDs that should be excluded from the calculations.
+        :param n_core: Number of computer cores to be used.
+        :param verbose: If True, it will print to stdout about the process computer currently calculates.
+        :param recalculate: If True, it will calculate anyway.
         """
-
         self.temp_repo_dir = temp_repo_dir
         self.sam_paths_background = sam_paths_background
         self.sam_paths_experiment = sam_paths_experiment
@@ -1418,6 +1426,7 @@ class RiboSeqExperiment:
         self.footprint_len_background = footprint_len_background
         self.gene_list = sorted(gene_info_dictionary.keys())
 
+        # Create the RiboSeqAssignment instances
         self.background = RiboSeqAssignment(self.sam_paths_background, self.temp_repo_dir, self.riboseq_assign_at[0],
                                             self.riboseq_assign_to, name_experiment + "_background",
                                             protein_genome_instance, gene_info_dictionary,
@@ -1432,18 +1441,24 @@ class RiboSeqExperiment:
                                             recalculate=self.recalculate, verbose=self.verbose)
 
         if self.exclude_genes:
-            # Todo: nasıldı bu ya? Bu sayede kaydedilen assignment dosyaları tekrar tekrar kullanılabilir oluyor
+            # After first instantiation of the class, the scripts saves the results as joblib files. Here, this chunk
+            # of line was added because it allows users to exclude some more genes without recalculating (re-assigning)
+            # from the beginning. Note that the saved RiboseqAssignment objects will not be changed after it is created.
             self.background.exclude_genes_calculate_stats(self.exclude_genes)
             self.experiment.exclude_genes_calculate_stats(self.exclude_genes)
 
 
 class RiboSeqSixtymers(RiboSeqExperiment):
+    """
+    asd
+    """
 
     def __init__(self, temp_repo_dir, sam_paths_background: list, sam_paths_experiment: list, name_experiment: str,
-                 riboseq_assign_at: Union[int, str, list],
-                 riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
+                 riboseq_assign_at: Union[int, str, list], riboseq_assign_to: str,
+                 protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
-                 exclude_genes: list = None, verbose: bool = True, recalculate: bool = False):
+                 exclude_genes: list = None, n_core: int = multiprocessing.cpu_count() - 2,
+                 verbose=True, recalculate=False):
 
         super().__init__(temp_repo_dir=temp_repo_dir,
                          sam_paths_background=sam_paths_background,
@@ -1456,10 +1471,11 @@ class RiboSeqSixtymers(RiboSeqExperiment):
                          footprint_len_experiment=footprint_len_experiment,
                          footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
+                         n_core=n_core,
                          verbose=verbose,
                          recalculate=recalculate)
 
-    def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top= 5):
+    def stalling_peaks_arpat(self, gene_id, mmc_threshold=1, normalized_peak_count_thr=5, get_top=5):
         # Arbitrarily 5 for all from the Arpat paper.
         land = self.experiment.calculate_rpm_positions(gene_id, average=True)  # library size normalized disome peaks
 
@@ -1677,7 +1693,8 @@ class RiboSeqSelective(RiboSeqExperiment):
                  riboseq_assign_at: Union[int, str, list],
                  riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
-                 exclude_genes: list = None, verbose=True, recalculate=False):
+                 exclude_genes: list = None, n_core: int = multiprocessing.cpu_count() - 2,
+                 verbose=True, recalculate=False):
         super().__init__(temp_repo_dir=temp_repo_dir,
                          sam_paths_background=sam_paths_background,
                          sam_paths_experiment=sam_paths_experiment,
@@ -1689,6 +1706,7 @@ class RiboSeqSelective(RiboSeqExperiment):
                          footprint_len_experiment=footprint_len_experiment,
                          footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
+                         n_core=n_core,
                          verbose=verbose,
                          recalculate=recalculate)
 
@@ -1702,7 +1720,8 @@ class RiboSeqCoco(RiboSeqExperiment):
                  riboseq_assign_at: Union[int, str, list],
                  riboseq_assign_to: str, protein_genome_instance: ProteinGenome, gene_info_dictionary: dict,
                  footprint_len_experiment: Union[int, list] = None, footprint_len_background: Union[int, list] = None,
-                 exclude_genes=None, verbose=True, recalculate=False):
+                 exclude_genes: list = None, n_core: int = multiprocessing.cpu_count() - 2,
+                 verbose=True, recalculate=False):
         super().__init__(temp_repo_dir=temp_repo_dir,
                          sam_paths_background=sam_paths_monosome,
                          sam_paths_experiment=sam_paths_disome,
@@ -1714,11 +1733,11 @@ class RiboSeqCoco(RiboSeqExperiment):
                          footprint_len_experiment=footprint_len_experiment,
                          footprint_len_background=footprint_len_background,
                          exclude_genes=exclude_genes,
+                         n_core=n_core,
                          verbose=verbose,
                          recalculate=recalculate)
 
         self.output_file_name_fitting_calc = os.path.join(self.temp_repo_dir, f"riboseq_{self.name_experiment}_fitting_calculations.joblib")
-        self.n_core = multiprocessing.cpu_count()
 
         try:
             assert os.access(self.output_file_name_fitting_calc, os.R_OK) and os.path.isfile(self.output_file_name_fitting_calc)
