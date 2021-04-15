@@ -9,8 +9,8 @@ import subprocess
 import sys
 import warnings
 import psutil
+import time
 import itertools
-# import logging  # todo
 # TODO: warnings.simplefilter('ignore', np.RankWarning)
 
 import joblib
@@ -117,7 +117,7 @@ def gene_class_dict_generate(temp_repo_dir, gene_list: list, gene_info_database:
     if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path) or recalculate:
         # If no file exists, or overwrite is 'True'.
         output = dict()  # Initiate an dictionary to fill up.
-        print_verbose(verbose, f"{Col.H}Gene information dictionary are being created.{Col.E}")
+        print_verbose(verbose, f"Gene information dictionary are being created.")
         # For each gene in the gene list,
         for ind, gene_id in enumerate(gene_list):
             # Print out the current process to stdout as a progress bar.
@@ -128,13 +128,13 @@ def gene_class_dict_generate(temp_repo_dir, gene_list: list, gene_info_database:
             gi_uniprot = gene_info_uniprot[gene_info_uniprot["ensembl_gene_id"] == gene_id]
             # Use the information to create a Gene object using the Gene class.
             output[gene_id] = Gene(gi, gi_names, gi_uniprot)
-        print_verbose(verbose, f"{Col.H}Results are being written to directory: {temp_repo_dir}{Col.E}")
+        print_verbose(verbose, f"Results are being written to directory: {temp_repo_dir}")
         # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
         joblib.dump(output, output_path)
         print_verbose(verbose, f"Done: {output_path}")
         return output  # Return the resulting dictionary.
     else:  # If the joblib file is found in the temp directory, or overwrite is 'False'.
-        print_verbose(verbose, f"{Col.H}Gene information dictionary is found in path: {output_path}{Col.E}")
+        print_verbose(verbose, f"Gene information dictionary is found in path: {output_path}")
         return joblib.load(output_path)  # Load and return the resulting dictionary.
 
 
@@ -238,8 +238,8 @@ class ProteinGenome:
             # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
             if self.recalculate:  # If 'recalculate' is True,
-                print_verbose(verbose, f"{Col.W}Saved file is found at the path but 'recalculate' is activated: "
-                                       f"{self.output_file_name}{Col.E}.")
+                print_verbose(verbose, f"Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Load the saved content from the directory.
             loaded_content = load_joblib("ProteinGenome", self.output_file_name, self.verbose)
@@ -249,13 +249,13 @@ class ProteinGenome:
                 self.ensembl_release == loaded_content.ensembl_release,  # The same ensembl release is used.
             ])
             if not consistent_with:  # If there is a problem, the stored does not match with current run.
-                print_verbose(verbose, f"{Col.W}There is at least one inconsistency between input parameters and "
-                                       f"loaded content. Recalculating.{Col.E}")
+                print_verbose(verbose, f"There is at least one inconsistency between input parameters and "
+                                       f"loaded content. Recalculating.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Otherwise, just accept the database saved in previous run.
             self.db = loaded_content.db
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
-            print_verbose(verbose, f"{Col.H}Protein genome mapping are being calculated.{Col.E}")
+            print_verbose(verbose, f"Protein genome mapping are being calculated.")
             self.db = self.calculate_transcript_mapping(ensembl_release_object)  # Calculate to get the mappings
             # Save the resulting filled dictionary into a joblib file to load without calculating again in next runs.
             save_joblib(self, self.output_file_name, self.verbose)
@@ -531,8 +531,8 @@ class EnsemblDomain:
             # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
             if self.recalculate:  # If 'recalculate' is True,
-                print_verbose(verbose, f"{Col.W}Saved file is found at the path but 'recalculate' is activated: "
-                                       f"{self.output_file_name}{Col.E}.")
+                print_verbose(verbose, f"Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Load the saved content from the directory.
             loaded_content = load_joblib(f"EnsemblDomain for {self.base_name}", self.output_file_name, self.verbose)
@@ -542,14 +542,14 @@ class EnsemblDomain:
                 self.ensembl_release == loaded_content.ensembl_release  # The same ensembl release is used.
             ])
             if not consistent_with:  # If there is a problem, the stored does not match with current run.
-                print_verbose(verbose, f"{Col.W}There is at least one inconsistency between input parameters and "
-                                       f"loaded content. Recalculating.{Col.E}")
+                print_verbose(verbose, f"There is at least one inconsistency between input parameters and "
+                                       f"loaded content. Recalculating.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Otherwise, just accept the database saved in previous run.
             self.df = loaded_content.df
             self.columns = loaded_content.columns
         except (AssertionError, AttributeError, FileNotFoundError):  # If an error is raised.
-            print_verbose(verbose, f"{Col.H}Ensembl domains are being calculated: {self.base_name}{Col.E}")
+            print_verbose(verbose, f"Ensembl domains are being calculated: {self.base_name}")
             self.df = biomart_mapping(self.temp_repo_dir, self.rscript,
                                       self.ensembl_release, self.organism)  # Get the annotations
             self.columns = self.df.columns
@@ -633,8 +633,8 @@ class RiboSeqAssignment:
             # Check if there is already a calculated object saved before.
             assert os.access(self.output_file_name, os.R_OK) and os.path.isfile(self.output_file_name)
             if self.recalculate:  # If 'recalculate' is True,
-                print_verbose(verbose, f"{Col.W}Saved file is found at the path but 'recalculate' is activated: "
-                                       f"{self.output_file_name}{Col.E}.")
+                print_verbose(verbose, f"Saved file is found at the path but 'recalculate' is activated: "
+                                       f"{self.output_file_name}.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Load the saved content from the directory.
             loaded_content = load_joblib(f"RiboSeq assignment for {self.riboseq_group}",
@@ -652,8 +652,8 @@ class RiboSeqAssignment:
                 all([g == l for g, l in zip(self.gene_list, loaded_content.gene_list)]),  # They are correctly sorted.
             ])
             if not consistent_with:  # If there is a problem, the stored does not match with current run.
-                print_verbose(verbose, f"{Col.W}There is at least one inconsistency between input parameters and "
-                                       f"loaded content. Recalculating.{Col.E}")
+                print_verbose(verbose, f"There is at least one inconsistency between input parameters and "
+                                       f"loaded content. Recalculating.")
                 raise AssertionError  # Raise the error to go to the except statement.
             # Otherwise, just accept the database saved in previous run.
             self.gene_assignments = loaded_content.gene_assignments
@@ -754,18 +754,6 @@ class RiboSeqAssignment:
         Used in by the auto-offset-calculating-method of this class so that the process can be completed in multiple
         cores at the same time for each footprint length separately.
         """
-
-        aa = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
-        fl = math.ceil(footprint_len / 3)  # Footprint length in amino acid
-        min_rpkm = 1  # Ignore genes that has lower RPKM value of 1.
-        palette = sns.color_palette("cubehelix", 3)
-        # Below line is not tested. It is designed to work for sixtymers with kernel size of 3 and for monomers with
-        # kernel size of 2. However, extensive testing is required.
-        kernel = [1, 1, 1] if footprint_len > 41 else [1, 1]  # Warning: "Why 41" should be investigated further!
-
-        first_position_ignore = max(-7, math.floor(fl / 3) + 1 - fl)
-        igr_ends = [first_position_ignore, -1]  # Check only relevant positions in the metafootprint profile
-
         # Initialize the resulting corrected dictionaries with zero values for all.
         result_k, result_l = dict(), dict()
         for gene_id in self.gene_list:
@@ -776,8 +764,20 @@ class RiboSeqAssignment:
                 result_k[gene_id][result_k[gene_id] == 0] = np.nan
                 result_l[gene_id] = np.array([np.nan] * (self.f5 + self.f3))
 
-        offsets = dict()  # Initialize offset dictionary to fill up in the end
+        aa = ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W', 'Y']
+        fl = math.ceil(footprint_len / 3)  # Footprint length in amino acid
+        min_rpkm = 1  # Ignore genes that has lower RPKM value of 1.
+        palette = sns.color_palette("cubehelix", 3)
         plt.figure(figsize=(7, 3))
+        offsets = dict()  # Initialize offset dictionary to fill up in the end
+
+        # Below line is not tested. It is designed to work for sixtymers with kernel size of 3 and for monomers with
+        # kernel size of 2. However, extensive testing is required.
+        kernel = [1, 1, 1] if footprint_len > 41 else [1, 1]  # Warning: "Why 41" should be investigated further!
+        first_position_ignore = max(-7, math.floor(fl / 3) + 1 - fl)
+        last_position_ignore = -2 if first_position_ignore < -5 else -1
+        igr_ends = [first_position_ignore, last_position_ignore]  # Check only relevant positions in the metafootprint profile
+
         for frm in [0, 1, 2]:  # For each frames for a given footprint length
 
             # Assign the length-frame combinations to CDSs and flanking regions
@@ -819,29 +819,32 @@ class RiboSeqAssignment:
                                     fill_matrix[i_fl, aa.index(fpca[i_fl])] += norm_count
                                 except ValueError:
                                     pass  # Raises ValueError for non-conventional amino acids
-            assert counter > 100, "Error in counter"
-            # Calculate the observed amino acid probabilities for each position
-            dfk_observed = pd.DataFrame(fill_matrix / np.mean(np.sum(fill_matrix, axis=1)), columns=aa)
-            # Calculate the expected amino acid probabilities for each position
-            dfk_expected = pd.DataFrame([ProteinAnalysis(prot_expected).get_amino_acids_percent()] * fl)
-            # Calculate KL divergence (entropy) for each position
-            sonc = [stats.entropy(dfk_observed.iloc[i], dfk_expected.iloc[i]) for i in range(fl)]
-            # Get the sum of consecutive positions (E-P-A positions) and find the maximum
-            max_kl_couple = np.argmax(np.convolve(sonc, kernel, mode="valid")[igr_ends[0]: igr_ends[1]])
-            a_site_pos = (igr_ends[0] + max_kl_couple) * 3  # Get the a-site position
-            offsets[frm] = a_site_pos  # Add to the dictionary to report
+            if counter < 1000:
+                offsets[frm] = np.nan
+            else:
+                # Calculate the observed amino acid probabilities for each position
+                dfk_observed = pd.DataFrame(fill_matrix / np.mean(np.sum(fill_matrix, axis=1)), columns=aa)
+                # Calculate the expected amino acid probabilities for each position
+                dfk_expected = pd.DataFrame([ProteinAnalysis(prot_expected).get_amino_acids_percent()] * fl)
+                # Calculate KL divergence (entropy) for each position
+                sonc = [stats.entropy(dfk_observed.iloc[i], dfk_expected.iloc[i]) for i in range(fl)]
+                # Get the sum of consecutive positions (E-P-A positions) and find the maximum
+                max_kl_couple = np.argmax(np.convolve(sonc, kernel, mode="valid")[igr_ends[0]: igr_ends[1]])
+                a_site_pos = (igr_ends[0] + max_kl_couple) * 3  # Get the a-site position
+                offsets[frm] = a_site_pos  # Add to the dictionary to report
 
-            plt.plot(sonc, color=palette[frm], marker=".", label=frm)
+                plt.plot(sonc, color=palette[frm], marker=".", label=frm)
 
-            for gene_id in self.gene_list:  # For all gene in the gene list
-                if gene_id not in self.exclude_gene_list:  # Skip if the gene is among excluded genes
-                    # Combine flanking and CDS together into one array
-                    merged = np.hstack([a_fla[gene_id][:, :f5_initial], a_cds[gene_id], a_fla[gene_id][:, f5_initial:]])
-                    # Get a slice considering final f5, f3 values and the offset.
-                    merged = merged[:, f5_initial - self.f5 - a_site_pos - 1: self.f3 - f3_initial - a_site_pos - 1]
-                    # Note that '-1' because the footprints were initially assigned to -1 position.
-                    result_k[gene_id] += merged[:, self.f5: -self.f3]  # Save the result
-                    result_l[gene_id] += np.hstack([merged[:, :self.f5], merged[:, -self.f3:]])  # Save the result
+                for gene_id in self.gene_list:  # For all gene in the gene list
+                    if gene_id not in self.exclude_gene_list:  # Skip if the gene is among excluded genes
+                        # Combine flanking and CDS together into one array
+                        merged = np.hstack([a_fla[gene_id][:, :f5_initial],
+                                            a_cds[gene_id],
+                                            a_fla[gene_id][:, f5_initial:]])
+                        # Get a slice considering final f5, f3 values and the offset.
+                        merged = merged[:, f5_initial - self.f5 - a_site_pos: self.f3 - f3_initial - a_site_pos]
+                        result_k[gene_id] += merged[:, self.f5: -self.f3]  # Save the result
+                        result_l[gene_id] += np.hstack([merged[:, :self.f5], merged[:, -self.f3:]])  # Save the result
 
         plt.title(f"Length {footprint_len}")
         plt.legend(title='Frames', bbox_to_anchor=(1, 1), loc='upper left')
@@ -873,7 +876,7 @@ class RiboSeqAssignment:
         :return:
         """
 
-        figure_dir = os.path.join(self.temp_repo_dir, f"figures_auto_offset_{self.riboseq_group}")
+        figure_dir = os.path.join(self.temp_repo_dir, f"riboseq_{self.riboseq_group}_figures_auto_offset")
         cleartarget(figure_dir)
 
         # Assuming each process takes 6 gb, calculate n_core to be used
@@ -885,8 +888,8 @@ class RiboSeqAssignment:
             protein_genome_instance, gene_info_dictionary, f5_initial, f3_initial)
 
         # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
-        print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
-        footprint_asg_lst = [self.footprint_assignment(  # Assignment is at -1 position.
+        print_verbose(verbose, f"Footprints are being assigned to genomic coordinates.")
+        footprint_asg_lst = [self.footprint_assignment(  # Assignment is at -1 position initially.
             sam_path, riboseq_assign_at=-1, split_by_length=True, calculate_distribution=False,
             footprint_len=footprint_len, verbose=verbose, only_dist=False)
             for sam_path in self.sam_paths]
@@ -949,7 +952,7 @@ class RiboSeqAssignment:
             protein_genome_instance, gene_info_dictionary, self.f5, self.f3)
 
         # Assign footprints to genomic positions by calling footprint_assignment method for each SAM file.
-        print_verbose(verbose, f"{Col.H}Footprints are being assigned to genomic coordinates.{Col.E}")
+        print_verbose(verbose, f"Footprints are being assigned to genomic coordinates.")
         resulting_dicts = [self.footprint_assignment(
             sam_path, self.riboseq_assign_at, split_by_length=False, calculate_distribution=True,
             footprint_len=footprint_len, verbose=verbose, only_dist=False)
@@ -957,11 +960,11 @@ class RiboSeqAssignment:
         footprint_genome_assignment_list, self.length_distribution = list(map(list, zip(*resulting_dicts)))
 
         # Assign footprints to gene positions by calling footprint_counts_to_genes method.
-        print_verbose(verbose, f"{Col.H}Footprint counts are being calculated and assigned to genes.{Col.E}")
+        print_verbose(verbose, f"Gene assignments are being calculated for footprints with all lengths.")
         gene_assignments = self.footprint_counts_to_genes(
-            footprint_genome_assignment_list, chromosome_gene, positions_gene, verbose=verbose)
+            footprint_genome_assignment_list, chromosome_gene, positions_gene, verbose=False)
         flanking_assignments = self.footprint_counts_to_genes(
-            footprint_genome_assignment_list, chromosome_gene, positions_flanking, verbose=verbose)
+            footprint_genome_assignment_list, chromosome_gene, positions_flanking, verbose=False)
         offsets = None
 
         return gene_assignments, flanking_assignments, offsets
@@ -1222,10 +1225,10 @@ class RiboSeqAssignment:
                     assigned_positions[e.reference_name].append(assigned_nucleotide)
 
         if verbose and counter:  # Report the number of footprints skipped.
-            print(f"{Col.W}{counter} footprints were skipped because assignment index was out of range.{Col.E}")
+            print_verbose(verbose, f"{counter} footprints were skipped because assignment index was out of range.")
 
         if verbose and counter_footprint_length:  # Report the number of footprints skipped.
-            print(f"{Col.W}{counter_footprint_length} footprints were skipped due to length constraint.{Col.E}")
+            print_verbose(verbose, f"{counter_footprint_length} footprints were skipped due to length constraint.")
 
         if only_dist and calculate_distribution:  # Return if only distribution is of interest
             return dist_single
@@ -1743,7 +1746,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             assert os.access(self.output_file_name_fitting_calc, os.R_OK) and os.path.isfile(self.output_file_name_fitting_calc)
             if self.recalculate:
                 print(
-                    f"{Col.W}Saved file is found at the path but 'recalculate=True': {self.output_file_name_fitting_calc}{Col.E}.")
+                    f"Saved file is found at the path but 'recalculate=True': {self.output_file_name_fitting_calc}.")
                 raise AssertionError
             loaded_content = self.load_joblib(self.output_file_name_fitting_calc, self.name_experiment, self.verbose)
             consistent_with = all([
@@ -1760,19 +1763,19 @@ class RiboSeqCoco(RiboSeqExperiment):
 
             if not consistent_with:
                 print(
-                    f"{Col.W}There is at least one inconsistency between input parameters and loaded content. Recalculating...{Col.E}")
+                    f"There is at least one inconsistency between input parameters and loaded content. Recalculating...")
                 raise AssertionError
             self.best_model = loaded_content["best_model"]
 
         except (AssertionError, AttributeError, FileNotFoundError):
-            print(f"{Col.H}Sigmoid fitting are being calculated: {self.name_experiment}{Col.E}")
+            print(f"Sigmoid fitting are being calculated: {self.name_experiment}")
             self.best_model = self.binomial_fitting(self.gene_list, n_core=self.n_core - 2)
             self.save_joblib()
 
     def save_joblib(self):
         # Write down the output dictionary and list as Joblib object for convenience in later uses.
         if self.verbose:
-            print(f"{Col.H}Calculations is being written to directory: {self.temp_repo_dir}{Col.E}")
+            print(f"Calculations is being written to directory: {self.temp_repo_dir}")
         to_dump = {"sam_paths_disome": self.sam_paths_experiment,
                    "sam_paths_monosome": self.sam_paths_background,
                    "output_file_name_fitting_calc": self.output_file_name_fitting_calc,
@@ -1786,7 +1789,7 @@ class RiboSeqCoco(RiboSeqExperiment):
     @staticmethod
     def load_joblib(output_file_name, name_experiment, verbose):
         if verbose:
-            print(f"{Col.H}Fitting calculations found for {name_experiment} in path: {output_file_name}{Col.E}")
+            print(f"Fitting calculations found for {name_experiment} in path: {output_file_name}")
         return joblib.load(output_file_name)
 
     def binomial_fitting(self, gene_list, n_core):
@@ -2023,7 +2026,7 @@ def biomart_mapping(temp_repo_dir, rscript, release, organism):  # organism name
     dataset_map = {"homo_sapiens": "hsapiens_gene_ensembl",
                    "mus_musculus": "mmusculus_gene_ensembl"}
     if not os.access(data_path, os.R_OK) or not os.path.isfile(data_path):
-        print(f"{Col.H}BiomaRt script is being run for {organism}: {base_name}.{Col.E}")
+        print(f"BiomaRt script is being run for {organism}: {base_name}.")
         r_installation = "RScript" if sys.platform == "darwin" else "Rscript"
         spr = subprocess.run(f"cd {temp_repo_dir}; {which(r_installation)} {rscript} "
                              f"{release} {dataset_map[organism]} {data_path}", shell=True)
@@ -2181,13 +2184,13 @@ def reduce_range_list(ranges):
 
 def save_joblib(object_to_dump, absolute_output_path, verbose):
     # Write down the output dictionary and list as Joblib object for convenience in later uses.
-    print_verbose(verbose, f"{Col.H}Instance is being written to directory.{Col.E}")
+    print_verbose(verbose, f"Instance is being written to directory.")
     joblib.dump(object_to_dump, absolute_output_path)
     print_verbose(verbose, f"Done: {absolute_output_path}")
 
 
 def load_joblib(object_name, output_file_name, verbose):
-    print_verbose(verbose, f"{Col.H}{object_name} found in path: {output_file_name}{Col.E}")
+    print_verbose(verbose, f"{object_name} found in path: {output_file_name}")
     return joblib.load(output_file_name)
 
 
@@ -2250,14 +2253,13 @@ def smooth_array(x: np.ndarray, window_len: int, window: str) -> np.ndarray:
 
 def print_verbose(verbose, message):
     if verbose:
-        print(message)
+        print(f"{Col.G}[{time.strftime('%d/%m/%Y %H:%M:%S %Z')}]{Col.E} {message}")
 
 
-def cleartarget(dir_path):
+def cleartarget(dir_path: str):
     """
-    Delete everything in the output folder
+    Delete everything in the output folder. Creates new one with the same name
     :param dir_path: Path of directory to delete
-    :return: None. Creates new one with the same name
     """
     try:
         rmtree(dir_path)
