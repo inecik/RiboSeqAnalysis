@@ -30,6 +30,7 @@ import pysam
 from shutil import which, rmtree
 from Bio.Seq import translate
 from Bio import pairwise2
+import pyBigWig
 import matplotlib.pyplot as plt
 import seaborn as sns
 from functools import partial
@@ -582,6 +583,41 @@ class EnsemblDomain:
         # Add these newly filled lists as a new columns to the object's main data frame.
         self.df["genome_chromosome"] = coordinates_contig
         self.df["genome_coordinate"] = coordinates_ranges
+
+
+class ConservationGerp:
+
+    def __init__(self, temp_repo_dir: str, organism: str, ensembl_release: int, verbose: bool = True):
+
+        self.temp_repo_dir = temp_repo_dir
+        self.ensembl_release = ensembl_release
+        self.organism = organism
+        self.verbose = verbose
+        organism_instance = OrganismDatabase(self.organism, self.ensembl_release, self.temp_repo_dir)
+        self.database_path = organism_instance.get_uncompressed_db("gerp")
+        with pyBigWig.open(self.database_path) as bw:  # Open BigWig file with pyBigWig library
+            self.contigs = list(bw.chroms().keys())  # Get the names of chromosomes in the BigWig file
+
+    def get_best_transcript(self, gene_id, gene_info_dictionary: dict, protein_genome_instance: ProteinGenome):
+        # Get the best transcript which is used to calculate positions_gene variable, at least 1 exists.
+        best_transcript = gene_info_dictionary[gene_id].transcripts.iloc[0][0]
+        the_ranges = protein_genome_instance.db[best_transcript][0]  # Get the ranges
+        contig = protein_genome_instance.db[best_transcript][3]  # Get the contig
+        return self.get_ranges(contig, the_ranges)
+
+    def get_ranges(self, contig, the_ranges):
+        result = list()
+        reverse_strand = all([rng[0] >= rng[1] for rng in the_ranges])
+        with pyBigWig.open(self.database_path) as bw:  # Open BigWig file with pyBigWig library
+            for rng in the_ranges:
+                if contig not in self.contigs:  # If gene's chromosome not in BigWig file
+                    # Create an array of np.nan values with the same length of gene
+                    result.append(np.full(abs(rng[1] - rng[0]) + 1, np.nan))
+                elif not reverse_strand:
+                    result.append(bw.values(contig, rng[0], rng[1] + 1, numpy=True))
+                else:
+                    result.append(np.flip(bw.values(contig, rng[1], rng[0] + 1, numpy=True)))
+        return np.concatenate(result)
 
 
 class RiboSeqAssignment:
@@ -2016,10 +2052,6 @@ class UniprotAnnotation:
         pass
 
 
-class ConservationGerp:
-    pass
-
-
 def biomart_mapping(temp_repo_dir, rscript, release, organism):  # organism name should be formatted identical to Organism class
     base_name = os.path.split(os.path.splitext(rscript)[0])[1]
     data_path = os.path.join(temp_repo_dir, f"{base_name}.txt")
@@ -2066,6 +2098,10 @@ class OrganismDatabase:
             # Protein Fasta
             pep_temp = "fasta/homo_sapiens/pep/Homo_sapiens.GRCh38.pep.all.fa.gz"
             self.pep = os.path.join(base_temp, pep_temp)
+            # Gerp Conservation score
+            gerp_temp = "compara/conservation_scores/111_mammals.gerp_conservation_score/" \
+                        "gerp_conservation_scores.homo_sapiens.GRCh38.bw"
+            self.gerp = os.path.join(base_temp, gerp_temp)
 
         elif self.organism == "mus_musculus":
             # Genome GTF
@@ -2083,17 +2119,29 @@ class OrganismDatabase:
             # Protein Fasta
             pep_temp = "fasta/mus_musculus/pep/Mus_musculus.GRCm38.pep.all.fa.gz"
             self.pep = os.path.join(base_temp, pep_temp)
+            # Gerp Conservation score
+            gerp_temp = "compara/conservation_scores/111_mammals.gerp_conservation_score/" \
+                        "gerp_conservation_scores.mus_musculus.GRCm38.bw"
+            self.gerp = os.path.join(base_temp, gerp_temp)
 
     def get_db(self, db):
         db_url = eval(f"self.{db}")
         output_path_compressed = os.path.join(self.temp_repo_dir, os.path.basename(db_url))
         output_path_uncompressed = os.path.splitext(output_path_compressed)[0]
         if not os.access(output_path_uncompressed, os.R_OK) or not os.path.isfile(output_path_uncompressed):
-            print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
             if not os.access(output_path_compressed, os.R_OK) or not os.path.isfile(output_path_compressed):
+                print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
                 subprocess.run(f"cd {self.temp_repo_dir}; curl -L -O --silent {db_url}", shell=True)
             subprocess.run(f"cd {self.temp_repo_dir}; gzip -d -q {output_path_compressed}", shell=True)
         return output_path_uncompressed
+
+    def get_uncompressed_db(self, db):
+        db_url = eval(f"self.{db}")
+        output_path = os.path.join(self.temp_repo_dir, os.path.basename(db_url))
+        if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path):
+            print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
+            subprocess.run(f"cd {self.temp_repo_dir}; curl -L -O --silent {db_url}", shell=True)
+        return output_path
 
 
 def ensembl_release_object_creator(temp_repo_dir, release, organism):
