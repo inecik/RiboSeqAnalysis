@@ -1702,11 +1702,10 @@ class RiboSeqSixtymers(RiboSeqExperiment):
     def plot_result(self, smoothen, gene_id, function, *args, **kwargs):
         total_exp = self.experiment.calculate_rpkm_genes(gene_id)
         total_tra = self.background.calculate_rpkm_genes(gene_id)
-        rpm_tra = self.background.calculate_rpm_genes(gene_id)
         if smoothen:
-            arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / rpm_tra
+            arr = smooth_array(self.experiment.calculate_rpm_positions(gene_id), window_len=23, window="hanning") / total_tra
         else:
-            arr = self.experiment.calculate_rpm_positions(gene_id) / rpm_tra
+            arr = self.experiment.calculate_rpm_positions(gene_id) / total_tra
         peaks = function(gene_id, *args, **kwargs)
         # Plot
         fig, ax = plt.subplots(1, 1, figsize=(14, 4))
