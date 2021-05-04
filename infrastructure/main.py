@@ -1683,13 +1683,12 @@ class RiboSeqSixtymers(RiboSeqExperiment):
         bac_rpkm = self.background.calculate_rpkm_genes(gene_id)
         exp_rpm_bs = self.experiment.calculate_rpm_positions(gene_id)
         assert exp_rpkm > min_rpkm_sixtymers and bac_rpkm > min_rpkm_background
-        rpm_gene = self.background.calculate_rpm_genes(gene_id)
         if smoothen:
             assert len(exp_rpm_bs) > window_len
-            exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / rpm_gene) + [0]
+            exp_rpm_s = [0] + list(smooth_array(exp_rpm_bs, window_len=window_len, window=window) / bac_rpkm) + [0]
             return np.array(exp_rpm_s)
         else:
-            exp_rpm_s = exp_rpm_bs / rpm_gene
+            exp_rpm_s = exp_rpm_bs / bac_rpkm
             return exp_rpm_s
 
     def inecik_gene_iterator(self, window, window_len, min_rpkm_sixtymers, min_rpkm_background, smoothen=True):
@@ -1719,7 +1718,7 @@ class RiboSeqSixtymers(RiboSeqExperiment):
                             f"RPKM Sixtymers: {round(total_exp, 2)}\n"
                             f"RPKM Translatome: {round(total_tra, 2)}",
                       fontsize=6, transform=ax.transAxes, verticalalignment='top', horizontalalignment="left")
-        ax.text(0.99, 0.99, f"Max: {round(arr.max(), 5)}\nPeaks: {len(peaks[0])}", fontsize=6,
+        ax.text(0.99, 0.99, f"Max: {round(arr.max(), 5)}\nPeaks: {len(peaks)}", fontsize=6,
                       transform=ax.transAxes, verticalalignment='top', horizontalalignment="right")
         ax.axes.get_yaxis().set_visible(False)
         ax.tick_params(labelsize=6)
