@@ -1889,7 +1889,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             x_mid = list(set([helper(ind, i, j, y_mid) for ind, (i, j) in enumerate(arr_stride[:-1]) if i <= y_mid <= j]))
             assert len(x_mid) != 0, f"Type 0 error in find_onset: {gene_id}"
             assert len(x_mid) == 1, f"Type 1 error in find_onset: {gene_id}"
-            return x_mid[0]
+            return x_mid[0] if x_mid[0] > 90 else np.nan
 
         def find_max(the_arr):
             the_arr = list(the_arr)
