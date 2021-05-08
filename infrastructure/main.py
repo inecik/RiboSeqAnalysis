@@ -2067,18 +2067,26 @@ def biomart_mapping(temp_repo_dir, rscript, release, organism):  # organism name
 
 # todo: sync this class with pipeline for your conveninence:
 class OrganismDatabase:
-    ID_MAP = {"homo_sapiens": 9606, "mus_musculus": 10090}
+
+    ID_MAP = {"homo_sapiens": 9606,
+              "mus_musculus": 10090,
+              "saccharomyces_cerevisiae": 4932,
+              "escherichia_coli": 562}
 
     def __init__(self, organism, ensembl_release, temp_repo_dir):
-        assert organism in ["homo_sapiens", "mus_musculus"]
-        # todo: also add "homo_sapiens_refseq"
-
+        assert organism in ["homo_sapiens", "mus_musculus", "saccharomyces_cerevisiae", "escherichia_coli"]
         self.ensembl_release = ensembl_release
         self.organism = organism
         self.organism_id = OrganismDatabase.ID_MAP[self.organism]
         self.temp_repo_dir = temp_repo_dir
+        self.repository = create_dir(self.temp_repo_dir, self.organism)
 
-        base_temp = f"ftp://ftp.ensembl.org/pub/release-{ensembl_release}"
+        if self.organism != "escherichia_coli":
+            assert 90 <= self.ensembl_release <= 104, "Ensembl Release must be between 90 and 104."
+            base_temp = f"ftp://ftp.ensembl.org/pub/release-{ensembl_release}"
+        else:
+            assert self.ensembl_release == 48, "Ensembl Release must be '48' for escherichia_coli."
+            base_temp = f"ftp://ftp.ensemblgenomes.org/pub/release-{ensembl_release}/bacteria"
 
         if self.organism == "homo_sapiens":
             # Genome GTF
@@ -2100,7 +2108,7 @@ class OrganismDatabase:
             gerp_temp = "compara/conservation_scores/111_mammals.gerp_conservation_score/" \
                         "gerp_conservation_scores.homo_sapiens.GRCh38.bw"
             self.gerp = os.path.join(base_temp, gerp_temp)
-
+        
         elif self.organism == "mus_musculus":
             # Genome GTF
             gtf_temp = f"gtf/mus_musculus/Mus_musculus.GRCm38.{self.ensembl_release}.chr_patch_hapl_scaff.gtf.gz"
@@ -2122,24 +2130,100 @@ class OrganismDatabase:
                         "gerp_conservation_scores.mus_musculus.GRCm38.bw"
             self.gerp = os.path.join(base_temp, gerp_temp)
 
+        elif self.organism == "saccharomyces_cerevisiae":
+            # Genome GTF
+            gtf_temp = f"gtf/saccharomyces_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.{self.ensembl_release}.gtf.gz"
+            self.gtf = os.path.join(base_temp, gtf_temp)
+            # Genome GFF3
+            gff3_temp = f"gff3/saccharomyces_cerevisiae/Saccharomyces_cerevisiae.R64-1-1.{self.ensembl_release}.gff3.gz"
+            self.gff3 = os.path.join(base_temp, gff3_temp)
+            # Genome DNA fasta
+            dna_temp = "fasta/saccharomyces_cerevisiae/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz" 
+            # Note: If the primary assembly file is not present, that indicates there are no haplotype or patch
+            # regions, and the 'toplevel' file is equivalent
+            self.dna = os.path.join(base_temp, dna_temp)
+            # Transcriptome DNA fasta
+            cdna_temp = "fasta/saccharomyces_cerevisiae/cdna/Saccharomyces_cerevisiae.R64-1-1.cdna.all.fa.gz"
+            self.cdna = os.path.join(base_temp, cdna_temp)
+            # Protein Fasta
+            pep_temp = "fasta/saccharomyces_cerevisiae/pep/Saccharomyces_cerevisiae.R64-1-1.pep.all.fa.gz"
+            self.pep = os.path.join(base_temp, pep_temp)
+
+        elif self.organism == "escherichia_coli":
+            # Genome GTF
+            gtf_temp = "gtf/bacteria_15_collection/escherichia_coli_bl21_de3_gca_000022665/" \
+                       "Escherichia_coli_bl21_de3_gca_000022665.ASM2266v1.48.gtf.gz"
+            self.gtf = os.path.join(base_temp, gtf_temp)
+            # Genome GFF3
+            gff3_temp = "gff3/bacteria_15_collection/escherichia_coli_bl21_de3_gca_000022665/" \
+                        "Escherichia_coli_bl21_de3_gca_000022665.ASM2266v1.46.gff3.gz"
+            self.gff3 = os.path.join(base_temp, gff3_temp)
+            # Genome DNA fasta
+            dna_temp = "fasta/bacteria_15_collection/escherichia_coli_bl21_de3_gca_000022665/dna/" \
+                       "Escherichia_coli_bl21_de3_gca_000022665.ASM2266v1.dna.nonchromosomal.fa.gz"
+            # Note: Nonchromosomal contains DNA that has not been assigned a chromosome
+            self.dna = os.path.join(base_temp, dna_temp)
+            # Transcriptome DNA fasta
+            cdna_temp = "fasta/bacteria_15_collection/escherichia_coli_bl21_de3_gca_000022665/cdna/" \
+                        "Escherichia_coli_bl21_de3_gca_000022665.ASM2266v1.cdna.all.fa.gz"
+            self.cdna = os.path.join(base_temp, cdna_temp)
+            # Protein Fasta
+            pep_temp = "fasta/bacteria_15_collection/escherichia_coli_bl21_de3_gca_000022665/pep/" \
+                       "Escherichia_coli_bl21_de3_gca_000022665.ASM2266v1.pep.all.fa.gz"
+            self.pep = os.path.join(base_temp, pep_temp)
+
+        rrna_base_temp = "ftp://ftp.ebi.ac.uk/pub/databases/RNAcentral/current_release"
+        self.rrna_raw_fasta = os.path.join(rrna_base_temp, "sequences/by-database/ena.fasta")
+        self.rrna_raw_information = os.path.join(rrna_base_temp, "id_mapping/database_mappings/ena.tsv")
+
     def get_db(self, db):
+        if db == "rrna":
+            return self._filter_rrna()
         db_url = eval(f"self.{db}")
-        output_path_compressed = os.path.join(self.temp_repo_dir, os.path.basename(db_url))
+        output_path_compressed = os.path.join(self.repository, os.path.basename(db_url))
         output_path_uncompressed = os.path.splitext(output_path_compressed)[0]
         if not os.access(output_path_uncompressed, os.R_OK) or not os.path.isfile(output_path_uncompressed):
             if not os.access(output_path_compressed, os.R_OK) or not os.path.isfile(output_path_compressed):
                 print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
-                subprocess.run(f"cd {self.temp_repo_dir}; curl -L -O --silent {db_url}", shell=True)
-            subprocess.run(f"cd {self.temp_repo_dir}; gzip -d -q {output_path_compressed}", shell=True)
+                run_and_check(f"cd {self.repository}; curl -L -O --silent {db_url}", shell=True)
+            subprocess.run(f"cd {self.repository}; gzip -d -q {output_path_compressed}", shell=True)
         return output_path_uncompressed
 
     def get_uncompressed_db(self, db):
         db_url = eval(f"self.{db}")
-        output_path = os.path.join(self.temp_repo_dir, os.path.basename(db_url))
+        output_path = os.path.join(self.repository, os.path.basename(db_url))
         if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path):
             print(f"Downloading from the server for {db}:{os.linesep}{db_url}")
-            subprocess.run(f"cd {self.temp_repo_dir}; curl -L -O --silent {db_url}", shell=True)
+            run_and_check(f"cd {self.repository}; curl -L -O --silent {db_url}", shell=True)
         return output_path
+
+    def _download_rna_central(self, db_url):
+        output_path = os.path.join(self.repository, os.path.basename(db_url))
+        if not os.access(output_path, os.R_OK) or not os.path.isfile(output_path):
+            print(f"Downloading from the server for rrna:{os.linesep}{db_url}")
+            run_and_check(f"cd {self.repository}; curl -L -O --silent {db_url}", shell=True)
+            # The specified command will be executed through the shell.
+        return output_path
+
+    def _filter_rrna(self):
+        db_info = self._download_rna_central(self.rrna_raw_information)
+        db_fasta = self._download_rna_central(self.rrna_raw_fasta)
+        db_fasta_filtered = os.path.splitext(db_fasta)[0] + "_only_rrna.fasta"
+        if not os.access(db_fasta_filtered, os.R_OK) or not os.path.isfile(db_fasta_filtered):
+            print(f"Filtering rRNAs for {self.organism}")
+            rrna_ids = set()
+            with open(db_info, "r") as handle_info:
+                for line in handle_info:
+                    line = line.split()
+                    if line[-1] == "rRNA":
+                        rrna_ids.add(line[0])
+            str_id = str(self.organism_id)
+            with open(db_fasta, "rt") as handle_fasta, open(db_fasta_filtered, "wt") as handle_output:
+                for record in SeqIO.parse(handle_fasta, "fasta"):
+                    split_record_id = record.id.split("_")
+                    if str_id == split_record_id[1] and split_record_id[0] in rrna_ids:
+                        SeqIO.write(record, handle_output, "fasta")
+        return db_fasta_filtered
 
 
 def ensembl_release_object_creator(temp_repo_dir, release, organism):
