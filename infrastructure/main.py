@@ -30,6 +30,7 @@ import pysam
 from shutil import which, rmtree
 from Bio.Seq import translate
 from Bio import pairwise2
+from Bio import SeqIO
 import pyBigWig
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -43,7 +44,7 @@ script_path_infrastructure = __file__
 class Infrastructre:
 
     def __init__(self, temp_repo_dir, organism: str, exclude_genes: list = None, ensembl_release=102,
-                 include_gene3d=False, verbose=True):
+                 include_gene3d=False, include_tmhmm=False, verbose=True):
 
         self.temp_repo_dir = temp_repo_dir
         self.exclude_genes = [] if not exclude_genes else exclude_genes
@@ -75,7 +76,13 @@ class Infrastructre:
 
         if include_gene3d:
             self.script_path_gene3d_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "gene3d.R"))
-            self.gene3d_database = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome,
+            self.db_gene3d = EnsemblDomain(self.temp_repo_dir, self.script_path_gene3d_db, self.protein_genome,
+                                                 ero, ensembl_release=self.ensembl_release,
+                                                 organism=self.organism, verbose=self.verbose)
+
+        if include_tmhmm:
+            self.script_path_tmhmm_db = os.path.abspath(os.path.join(os.path.dirname(self.script_path_infrastructure), "tmhmm.R"))
+            self.db_tmhmm = EnsemblDomain(self.temp_repo_dir, self.script_path_tmhmm_db, self.protein_genome,
                                                  ero, ensembl_release=self.ensembl_release,
                                                  organism=self.organism, verbose=self.verbose)
 
@@ -1889,7 +1896,7 @@ class RiboSeqCoco(RiboSeqExperiment):
             x_mid = list(set([helper(ind, i, j, y_mid) for ind, (i, j) in enumerate(arr_stride[:-1]) if i <= y_mid <= j]))
             assert len(x_mid) != 0, f"Type 0 error in find_onset: {gene_id}"
             assert len(x_mid) == 1, f"Type 1 error in find_onset: {gene_id}"
-            return x_mid[0] if x_mid[0] > 90 else np.nan
+            return x_mid[0] if x_mid[0] > 90 else np.nan  # From Mati's pipeline. Not first 30 aa is coco-onset
 
         def find_max(the_arr):
             the_arr = list(the_arr)
@@ -2079,7 +2086,7 @@ class OrganismDatabase:
         self.organism = organism
         self.organism_id = OrganismDatabase.ID_MAP[self.organism]
         self.temp_repo_dir = temp_repo_dir
-        self.repository = create_dir(self.temp_repo_dir, self.organism)
+        self.repository = self.temp_repo_dir # create_dir(self.temp_repo_dir, self.organism)
 
         if self.organism != "escherichia_coli":
             assert 90 <= self.ensembl_release <= 104, "Ensembl Release must be between 90 and 104."
@@ -2396,6 +2403,12 @@ def cleartarget(dir_path: str):
     except FileNotFoundError:
         pass
     os.mkdir(dir_path)
+
+
+def run_and_check(the_string, *args, **kwargs):
+    s = subprocess.run(the_string, *args, **kwargs)
+    if s.returncode != 0:
+        print(f"{Col.F}Error in the following subprocess:{os.linesep}{the_string}{os.linesep}{Col.E}")
 
 
 class Col:
