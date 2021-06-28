@@ -500,6 +500,10 @@ class ProteinGenome:
         return [[i + origin, j + origin] if transcript[4] == "+" else [origin - i, origin - j]
                 for i, j in output_relative_introns]
 
+    def genome2protein(self, transcript_id: str, chr: str, start: int, end: int):
+
+
+        pass
 
 class EnsemblDomain:
     """
