@@ -7,4 +7,5 @@
 
 
 ### Example Output
-[<img src="matrix" width="250"/>](images/matrix.png)
+<img src="images/matrix.png" width="%10" height="%10">
+
