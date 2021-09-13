@@ -1,3 +1,3 @@
 # RiboSeqAnalysis
 
-Will be updated
+Will be updated very soon with already written code chunks at my computer.
