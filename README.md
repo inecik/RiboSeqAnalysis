@@ -6,4 +6,4 @@
 ![Architecture](images/map.png?raw=true "Architecture")
 
 ### Example Output
-![Matrix](images/matrix.png?raw=true "Matrix")
+![Matrix](images/matrix.png?raw=true "Matrix"){ width=50% }
