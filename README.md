@@ -3,7 +3,8 @@
 ! Will be updated very soon with already written code chunks at my computer
 
 ### Package Architecture
+[<img src="image.png" width="250"/>](image.png)
 ![Architecture](images/map.png?raw=true "Architecture")
 
 ### Example Output
-![Matrix](images/matrix.png?raw=true "Matrix"){ width=400px }
+[<img src="matrix" width="250"/>](images/matrix.png)
