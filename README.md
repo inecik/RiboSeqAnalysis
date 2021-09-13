@@ -7,5 +7,7 @@
 
 
 ### Example Output
-<img src="images/matrix.png" width="40%" height="40%">
+Infrastructure.get(ensembl_id) -> np.ndarray
+
+<img src="images/matrix.png" width="35%" height="35%">
 
