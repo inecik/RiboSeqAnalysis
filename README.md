@@ -3,9 +3,9 @@
 ! Will be updated very soon with already written code chunks at my computer
 
 ### Package Architecture
-<img src="images/map.png" width="50%" height="50%">
+<img src="images/map.png" width="70%" height="70%">
 
 
 ### Example Output
-<img src="images/matrix.png" width="10%" height="10%">
+<img src="images/matrix.png" width="40%" height="40%">
 
